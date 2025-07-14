@@ -66,6 +66,7 @@ const suppressDiagnosticsInG3: number[] = [
 
 const enum SemanticClassifierTokenType {
   signal = 142,
+  inputSignal = 143,
 }
 
 export enum SemanticClassifierTokenModifier {

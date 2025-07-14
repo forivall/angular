@@ -9,7 +9,7 @@
 import {initMockFileSystem} from '@angular/compiler-cli/src/ngtsc/file_system/testing';
 
 import {createModuleAndProjectWithDeclarations, LanguageServiceTestEnv} from '../testing';
-
+import {SemanticClassificationFormat} from 'typescript';
 fdescribe('semantic classifier', () => {
   let env: LanguageServiceTestEnv;
   beforeEach(() => {
@@ -77,9 +77,13 @@ fdescribe('semantic classifier', () => {
       const project = createModuleAndProjectWithDeclarations(env, 'test', files);
       const appFile = project.openFile('app.ts');
       appFile.moveCursorToText('bl¦a');
-      const target = appFile.getDefinitionAndBoundSpan();
-      expect(target).toBeTruthy();
-      const refactorings = project.getSemanticTokens('app.ts', target!.textSpan!);
+      const target = appFile.getReferencesAtPosition();
+      expect(target?.length).toBeTruthy();
+      const refactorings = project.getSemanticTokens(
+        'app.ts',
+        target![0].textSpan,
+        SemanticClassificationFormat.TwentyTwenty,
+      );
 
       expect(refactorings.spans.length).toBe(3);
     });
