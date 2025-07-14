@@ -49,6 +49,7 @@ import {
 } from './utils/ts_utils';
 import {getTypeCheckInfoAtPosition, isTypeScriptFile} from './utils';
 import {ActiveRefactoring, allRefactorings} from './refactorings/refactoring';
+import {getSemanticClassificationsImpl} from './semantic_classifier';
 
 type LanguageServiceConfig = Omit<PluginConfig, 'angularOnly'>;
 
@@ -400,116 +401,15 @@ export class LanguageService {
     }
     return this.withCompilerAndPerfTracing(PerfPhase.LsCompletions, (compiler) => {
       const spans: number[] = [];
-      const program = compiler.getCurrentProgram();
-      const sourceFile = program.getSourceFile(fileName);
-
-      function addSignalSpan(node: ts.Node, isReadonly: boolean) {
+      function addSignalSpan(start: number, length: number, isReadonly: boolean) {
         spans.push(
-          node.getStart(sourceFile),
-          node.getWidth(sourceFile),
+          start,
+          length,
           SemanticClassifierTokenType.signal |
             (isReadonly ? SemanticClassifierTokenModifier.readonly : 0),
         );
       }
-      function collectTokens(program: ts.Program, sourceFile: ts.SourceFile, span: ts.TextSpan) {
-        const typeChecker = program.getTypeChecker();
-
-        let inJSXElement = false;
-
-        function visit(node: ts.Node) {
-          if (
-            !node ||
-            !ts.textSpanIntersectsWith(span, node.pos, node.getFullWidth()) ||
-            node.getFullWidth() === 0
-          ) {
-            return;
-          }
-          const prevInJSXElement = inJSXElement;
-          if (ts.isJsxElement(node) || ts.isJsxSelfClosingElement(node)) {
-            inJSXElement = true;
-          }
-          if (ts.isJsxExpression(node)) {
-            inJSXElement = false;
-          }
-
-          collectSignalSpan: if (
-            ts.isIdentifier(node) &&
-            !inJSXElement &&
-            !inImportClause(node) &&
-            !isInfinityOrNaNString(node.escapedText)
-          ) {
-            let symbol = typeChecker.getSymbolAtLocation(node);
-            if (symbol) {
-              if (symbol.flags & ts.SymbolFlags.Alias) {
-                symbol = typeChecker.getAliasedSymbol(symbol);
-              }
-              if (symbol.flags & ts.SymbolFlags.Property) {
-                const decl = symbol.valueDeclaration;
-                if (decl) {
-                  const declType = (decl as ts.HasType).type;
-                  if (declType) {
-                    const declText = declType.getText();
-                    if (/\bWritableSignal\b/.test(declText)) {
-                      addSignalSpan(node, false);
-                    } else if (/\bSignal\b/.test(declText)) {
-                      addSignalSpan(node, true);
-                    }
-                    break collectSignalSpan;
-                  }
-                  if (
-                    ts.hasOnlyExpressionInitializer(decl) &&
-                    decl.initializer &&
-                    ts.isCallExpression(decl.initializer)
-                  ) {
-                    const declExpression = decl.initializer.expression;
-                    if (ts.isIdentifier(declExpression)) {
-                      const initializerExpressionText = declExpression.getText();
-                      switch (initializerExpressionText) {
-                        case 'computed':
-                        case 'input':
-                        case 'signal':
-                        case 'linkedSignal':
-                          addSignalSpan(
-                            node.getStart(sourceFile),
-                            node.getWidth(sourceFile),
-                            false,
-                          );
-                          break collectSignalSpan;
-                      }
-                    } else if (
-                      ts.isPropertyAccessExpression(declExpression) &&
-                      declExpression.name.getText() === 'asReadonly'
-                    ) {
-                      addSignalSpan(node.getStart(sourceFile), node.getWidth(sourceFile), true);
-                      break collectSignalSpan;
-                    }
-                  }
-                }
-                const type = typeChecker.getTypeOfSymbol(symbol);
-                if (type) {
-                  const typeName = (type.aliasSymbol ?? type.symbol)?.name;
-                  if (/\bWritableSignal\b/.test(typeName)) {
-                    addSignalSpan(node, false);
-                  } else if (/\bSignal\b/.test(typeName)) {
-                    addSignalSpan(node, true);
-                  }
-                }
-
-                // TODO?
-                // symbol.declarations.some((d) =>
-              }
-            }
-          }
-          ts.forEachChild(node, visit);
-
-          inJSXElement = prevInJSXElement;
-        }
-        visit(sourceFile);
-      }
-
-      if (program && sourceFile) {
-        collectTokens(program, sourceFile, span);
-      }
+      getSemanticClassificationsImpl(fileName, compiler, span, addSignalSpan);
       return {endOfLineState: ts.EndOfLineState.None, spans};
     });
   }
@@ -986,22 +886,4 @@ function getUniqueLocations<T extends ts.DocumentSpan>(locations: readonly T[]):
     uniqueLocations.set(createLocationKey(location), location);
   }
   return Array.from(uniqueLocations.values());
-}
-
-function inImportClause(node: ts.Node): boolean {
-  const parent = node.parent;
-  return (
-    parent &&
-    (ts.isImportClause(parent) || ts.isImportSpecifier(parent) || ts.isNamespaceImport(parent))
-  );
-}
-function isInfinityOrNaNString(name: string | ts.__String): boolean {
-  return name === 'Infinity' || name === '-Infinity' || name === 'NaN';
-}
-
-function isRightSideOfQualifiedNameOrPropertyAccess(node: ts.Node): boolean {
-  return (
-    (ts.isQualifiedName(node.parent) && node.parent.right === node) ||
-    (ts.isPropertyAccessExpression(node.parent) && node.parent.name === node)
-  );
 }
