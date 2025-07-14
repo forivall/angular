@@ -205,6 +205,23 @@ export function create(info: ts.server.PluginCreateInfo): NgLanguageService {
       );
     }
   }
+
+  function getEncodedSemanticClassifications(
+    fileName: string,
+    span: ts.TextSpan,
+    format?: ts.SemanticClassificationFormat,
+  ): ts.Classifications {
+    if (angularOnly || !isTypeScriptFile(fileName)) {
+      return ngLS.getEncodedSemanticClassifications(fileName, span, format);
+    } else {
+      // If TS could answer the query, then return that result. Otherwise, return from Angular LS.
+      return (
+        tsLS.getEncodedSemanticClassifications(fileName, span, format) ??
+        ngLS.getEncodedSemanticClassifications(fileName, span, format)
+      );
+    }
+  }
+
   /**
    * Gets global diagnostics related to the program configuration and compiler options.
    */
@@ -355,6 +372,7 @@ export function create(info: ts.server.PluginCreateInfo): NgLanguageService {
     getCompletionsAtPosition,
     getCompletionEntryDetails,
     getCompletionEntrySymbol,
+    getEncodedSemanticClassifications,
     getTcb,
     getCompilerOptionsDiagnostics,
     getComponentLocationsForTemplate,
