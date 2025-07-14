@@ -191,6 +191,15 @@ export class Project {
     return this.ngLS.getPossibleRefactorings(fileName, positionOrRange);
   }
 
+  getSemanticTokens(
+    projectFileName: string,
+    span: ts.TextSpan,
+    format?: ts.SemanticClassificationFormat,
+  ) {
+    const fileName = absoluteFrom(`/${this.name}/${projectFileName}`);
+    return this.ngLS.getEncodedSemanticClassifications(fileName, span, format);
+  }
+
   applyRefactoring(
     projectFileName: string,
     positionOrRange: number | ts.TextRange,
