@@ -19,13 +19,14 @@ import {
   getSourceFileOrError,
 } from '@angular/compiler-cli/src/ngtsc/file_system';
 import {OptimizeFor, TemplateTypeChecker} from '@angular/compiler-cli/src/ngtsc/typecheck/api';
-import ts from 'typescript';
+import ts, {EndOfLineState} from 'typescript';
 
 import {LanguageService} from '../../src/language_service';
 import {ApplyRefactoringProgressFn, ApplyRefactoringResult} from '../../api';
 
 import {OpenBuffer} from './buffer';
 import {patchLanguageServiceProjectsWithTestHost} from './language_service_test_cache';
+import {getSemanticClassificationsImpl, type AddSignalSpan} from '../../src/semantic_classifier';
 
 export type ProjectFiles = {
   [fileName: string]: string;
@@ -191,12 +192,28 @@ export class Project {
     return this.ngLS.getPossibleRefactorings(fileName, positionOrRange);
   }
 
+  getSemanticTokens(projectFileName: string, span: ts.TextSpan, format: AddSignalSpan): void;
   getSemanticTokens(
     projectFileName: string,
     span: ts.TextSpan,
     format?: ts.SemanticClassificationFormat,
+  ): ts.Classifications;
+  getSemanticTokens(
+    projectFileName: string,
+    span: ts.TextSpan,
+    format?: ts.SemanticClassificationFormat | AddSignalSpan,
+  ): ts.Classifications | undefined;
+  getSemanticTokens(
+    projectFileName: string,
+    span: ts.TextSpan,
+    format?: ts.SemanticClassificationFormat | AddSignalSpan,
   ) {
     const fileName = absoluteFrom(`/${this.name}/${projectFileName}`);
+    if (typeof format === 'function') {
+      const compiler = this.ngLS.compilerFactory.getOrCreate();
+      getSemanticClassificationsImpl(compiler, projectFileName, span, format);
+      return;
+    }
     return this.ngLS.getEncodedSemanticClassifications(fileName, span, format);
   }
 

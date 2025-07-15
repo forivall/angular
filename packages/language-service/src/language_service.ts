@@ -410,7 +410,7 @@ export class LanguageService {
             (isReadonly ? SemanticClassifierTokenModifier.readonly : 0),
         );
       }
-      getSemanticClassificationsImpl(fileName, compiler, span, addSignalSpan);
+      getSemanticClassificationsImpl(compiler, fileName, span, addSignalSpan);
       return {endOfLineState: ts.EndOfLineState.None, spans};
     });
   }
