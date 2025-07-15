@@ -25,6 +25,7 @@ export type AddSignalSpan = (
   isReadonly: boolean,
   isInput: boolean,
 ) => void;
+export type OnSignal = (isReadonly: boolean, isInput: boolean) => void;
 
 export function getSemanticClassificationsImpl(
   compiler: NgCompiler,
@@ -61,7 +62,16 @@ export function getSemanticClassificationsImpl(
       !inImportClause(node) &&
       !isInfinityOrNaNString(node.escapedText)
     ) {
-      collectSignal(typeChecker, node, addSignalSpan, sourceFile);
+      let symbol = typeChecker.getSymbolAtLocation(node);
+      if (symbol) {
+        if (symbol.flags & ts.SymbolFlags.Alias) {
+          symbol = typeChecker.getAliasedSymbol(symbol);
+        }
+        const tsType = typeChecker.getTypeOfSymbol(symbol);
+        collectSignal(tsType, symbol, (isReadonly, isInput) =>
+          addSignalSpan(node.getStart(), node.getWidth(), isReadonly, isInput),
+        );
+      }
     }
     ts.forEachChild(node, visitTs);
 
@@ -130,25 +140,11 @@ function textSpanIntersectsWithParseSpan(span: ts.TextSpan, parseSpan: ParseSour
 }
 
 function collectSignal(
-  typeChecker: ts.TypeChecker,
-  node: ts.Node,
-  addSignalSpan: AddSignalSpan,
-  sourceFile?: ts.SourceFile,
+  tsType: ts.Type,
+  tsSymbol: ts.Symbol,
+  onSignal: (isReadonly: boolean, isInput: boolean) => void,
 ) {
-  let symbol = typeChecker.getSymbolAtLocation(node);
-  if (!symbol) {
-    return;
-  }
-
-  function addSignalSpanForNode(node: ts.Node, isReadonly: boolean, isInput: boolean) {
-    addSignalSpan(node.getStart(sourceFile), node.getWidth(sourceFile), isReadonly, isInput);
-  }
-
-  if (symbol.flags & ts.SymbolFlags.Alias) {
-    symbol = typeChecker.getAliasedSymbol(symbol);
-  }
-  const symbolType = typeChecker.getTypeOfSymbol(symbol);
-  const typeSymbol = symbolType.symbol;
+  const typeSymbol = tsType.symbol;
   if (!typeSymbol) {
     return;
   }
@@ -171,21 +167,21 @@ function collectSignal(
       /\/@angular\/core\//.test(decl.getSourceFile().fileName),
     );
     if (isAngularCoreSignal) {
-      addSignalSpanForNode(node, isReadonly, isInput);
+      onSignal(isReadonly, isInput);
       return;
     }
   }
 
-  if (symbol.flags & ts.SymbolFlags.Property) {
-    const decl = symbol.valueDeclaration;
+  if (tsSymbol.flags & ts.SymbolFlags.Property) {
+    const decl = tsSymbol.valueDeclaration;
     if (decl) {
       const declType = (decl as ts.HasType).type;
       if (declType) {
         const declText = declType.getText();
         if (/\bWritableSignal\b/.test(declText)) {
-          addSignalSpanForNode(node, false, false);
+          onSignal(false, false);
         } else if (/\bSignal\b/.test(declText)) {
-          addSignalSpanForNode(node, true, false);
+          onSignal(true, false);
         }
         return;
       }
@@ -321,7 +317,11 @@ class ExpressionsSemanticClassifierVisitor extends RecursiveAstVisitor {
       : T & {[_ in K]?: never};
     const tsSymbol = (symbol as ExtractWithKey<typeof symbol, 'tsSymbol'>).tsSymbol;
     const tsType = (symbol as ExtractWithKey<typeof symbol, 'tsType'>).tsType;
-    symbol?.kind;
-    debugger;
+    if (tsType && tsSymbol) {
+      collectSignal(tsType, tsSymbol, (isReadonly, isInput) => {
+        const {start} = ast.span;
+        this.addSignalSpan(start, ast.span.end - start, isReadonly, isInput);
+      });
+    }
   }
 }

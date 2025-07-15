@@ -11,14 +11,16 @@ import {initMockFileSystem} from '@angular/compiler-cli/src/ngtsc/file_system/te
 import {createModuleAndProjectWithDeclarations, LanguageServiceTestEnv} from '../testing';
 import {SemanticClassificationFormat} from 'typescript';
 import {getSemanticClassificationsImpl, type AddSignalSpan} from '../src/semantic_classifier';
-fdescribe('semantic classifier', () => {
+describe('semantic classifier', () => {
   let env: LanguageServiceTestEnv;
-  let collectedSignals: Array<{
+  interface CollectedSignal {
     start: number;
     length: number;
     isReadonly: boolean;
     isInput: boolean;
-  }>;
+  }
+
+  let collectedSignals: Array<CollectedSignal>;
   const addSignalSpan: AddSignalSpan = (start, length, isReadonly, isInput) =>
     collectedSignals!.push({start, length, isReadonly, isInput});
 
@@ -93,10 +95,10 @@ fdescribe('semantic classifier', () => {
       expect(classifications.spans.length).toBe(3);
     });
 
-    fit('should classify signal input in inline template', () => {
+    it('should classify signal input in inline template', () => {
       const files = {
         'app.ts': `
-      import {Component, NgModule} from '@angular/core';
+      import {Component, NgModule, input} from '@angular/core';
 
       @Component({
         template: 'Hello world! {{bla()}}',
@@ -114,10 +116,10 @@ fdescribe('semantic classifier', () => {
       expect(collectedSignals.length).toBe(2);
     });
 
-    fit('should classify signal input in external template', () => {
+    it('should classify signal input in external template', () => {
       const files = {
         'app.ts': `
-      import {Component, NgModule} from '@angular/core';
+      import {Component, NgModule, input} from '@angular/core';
 
       @Component({
         templateUrl: './app.html',
@@ -132,8 +134,16 @@ fdescribe('semantic classifier', () => {
 
       const project = createModuleAndProjectWithDeclarations(env, 'test', files);
       const appFile = project.openFile('app.html');
+      appFile.moveCursorToText('bl¦a');
+
       project.getSemanticTokens('app.html', appFile.span, addSignalSpan);
       expect(collectedSignals.length).toBe(1);
+      expect(collectedSignals[0]).toEqual({
+        start: appFile.cursor - 2,
+        length: 3,
+        isReadonly: true,
+        isInput: true,
+      });
     });
   });
 

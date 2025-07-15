@@ -211,7 +211,7 @@ export class Project {
     const fileName = absoluteFrom(`/${this.name}/${projectFileName}`);
     if (typeof format === 'function') {
       const compiler = this.ngLS.compilerFactory.getOrCreate();
-      getSemanticClassificationsImpl(compiler, projectFileName, span, format);
+      getSemanticClassificationsImpl(compiler, fileName, span, format);
       return;
     }
     return this.ngLS.getEncodedSemanticClassifications(fileName, span, format);
