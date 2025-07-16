@@ -320,12 +320,7 @@ export class LanguageService {
         return {spans: [], endOfLineState: ts.EndOfLineState.None};
       }
 
-      const classDeclarations: ts.ClassDeclaration[] = [];
-      sf.forEachChild((node) => {
-        if (ts.isClassDeclaration(node)) {
-          classDeclarations.push(node);
-        }
-      });
+      const classDeclarations: ts.ClassDeclaration[] = sf.statements.filter(ts.isClassDeclaration);
 
       const hasInlineTemplate = (classDecl: ts.ClassDeclaration) => {
         const resources = compiler.getDirectiveResources(classDecl);
