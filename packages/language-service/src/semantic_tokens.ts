@@ -37,6 +37,7 @@ import {
   TmplAstDirective,
   ParseSourceSpan,
 } from '@angular/compiler';
+import type {TemplateTypeChecker} from '@angular/compiler-cli/src/ngtsc/typecheck/api';
 import {NgCompiler} from '@angular/compiler-cli/src/ngtsc/core';
 import {PotentialDirective} from '@angular/compiler-cli/src/ngtsc/typecheck/api';
 import ts from 'typescript';
@@ -88,9 +89,8 @@ export function getClassificationsForTemplate(
   range: ts.TextSpan,
 ): ts.Classifications {
   const templateTypeChecker = compiler.getTemplateTypeChecker();
-  const potentialTags = templateTypeChecker.getElementsInFileScope(typeCheckInfo.declaration);
 
-  const visitor = new ClassificationVisitor(potentialTags, range);
+  const visitor = new ClassificationVisitor(templateTypeChecker, typeCheckInfo.declaration, range);
   visitor.visitAll(typeCheckInfo.nodes);
 
   return {
@@ -101,10 +101,14 @@ export function getClassificationsForTemplate(
 
 class ClassificationVisitor implements TmplAstVisitor {
   private spans: number[] = [];
+  private tags: Map<string, PotentialDirective | null>;
   constructor(
-    private tags: Map<string, PotentialDirective | null>,
+    private templateTypeChecker: TemplateTypeChecker,
+    private component: ts.ClassDeclaration,
     private range: ts.TextSpan,
-  ) {}
+  ) {
+    this.tags = templateTypeChecker.getElementsInFileScope(component);
+  }
 
   getSpans(): number[] {
     return this.spans;
