@@ -48,7 +48,7 @@ describe('semantic tokens', () => {
     <ng-template>
       <test-comp/>
     </ng-template>
-    
+
     <!-- content -->
     <ng-content>
       <test-comp/>
@@ -82,7 +82,7 @@ describe('semantic tokens', () => {
     } @empty {
       <li> <test-comp/> </li>
     }
-    
+
     <!-- if / else -->
     @if (true) {
       <test-comp/>
@@ -111,27 +111,27 @@ describe('semantic tokens', () => {
       semanticToken('class', 'test-comp', 271),
 
       // ng-content
-      semanticToken('class', 'test-comp', 352),
+      semanticToken('class', 'test-comp', 352 - 4),
 
       // @defer
-      semanticToken('class', 'test-comp', 422),
-      semanticToken('class', 'test-comp', 463),
-      semanticToken('class', 'test-comp', 500),
-      semanticToken('class', 'test-comp', 535),
+      semanticToken('class', 'test-comp', 422 - 4),
+      semanticToken('class', 'test-comp', 463 - 4),
+      semanticToken('class', 'test-comp', 500 - 4),
+      semanticToken('class', 'test-comp', 535 - 4),
 
       // @switch
-      semanticToken('class', 'test-comp', 623),
-      semanticToken('class', 'test-comp', 664),
-      semanticToken('class', 'test-comp', 704),
+      semanticToken('class', 'test-comp', 623 - 4),
+      semanticToken('class', 'test-comp', 664 - 4),
+      semanticToken('class', 'test-comp', 704 - 4),
 
       // @for
-      semanticToken('class', 'test-comp', 798),
-      semanticToken('class', 'test-comp', 843),
+      semanticToken('class', 'test-comp', 798 - 4),
+      semanticToken('class', 'test-comp', 843 - 4),
 
       // @if/else
-      semanticToken('class', 'test-comp', 919),
-      semanticToken('class', 'test-comp', 963),
-      semanticToken('class', 'test-comp', 996),
+      semanticToken('class', 'test-comp', 919 - 8),
+      semanticToken('class', 'test-comp', 963 - 8),
+      semanticToken('class', 'test-comp', 996 - 8),
     );
   });
 
