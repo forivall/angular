@@ -259,6 +259,7 @@ function setupInlineTemplate(
            ${classContents}
          }
 
+        import { EventEmitter } from '@angular/core';
         @Component({
           selector: 'test-comp',
           template: '<div>Testing: {{name}}</div>',
