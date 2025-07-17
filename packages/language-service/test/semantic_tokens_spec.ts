@@ -330,8 +330,8 @@ function convertToString(classification: number) {
   const modifiers = classification & TokenEncodingConsts.modifierMask;
 
   const typeName = TOKEN_TYPES[typeIdx];
-  const modifierNames = Object.keys(TOKEN_MODIFIERS)
-    .filter((i) => modifiers & (1 << parseInt(i)))
+  const modifierNames = Object.entries(TOKEN_MODIFIERS)
+    .filter(([i]) => modifiers & (1 << parseInt(i)))
     .map(([_, name]) => name);
 
   return [typeName, ...modifierNames].join('.');
