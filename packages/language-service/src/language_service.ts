@@ -49,7 +49,11 @@ import {
 } from './utils/ts_utils';
 import {getTypeCheckInfoAtPosition, isTypeScriptFile, TypeCheckInfo} from './utils';
 import {ActiveRefactoring, allRefactorings} from './refactorings/refactoring';
-import {getClassificationsForTemplate, TokenEncodingConsts} from './semantic_tokens';
+import {
+  getClassificationsForTemplate,
+  getClassificationsForTypescript,
+  TokenEncodingConsts,
+} from './semantic_tokens';
 import {isExternalResource} from '@angular/compiler-cli/src/ngtsc/metadata';
 
 type LanguageServiceConfig = Omit<PluginConfig, 'angularOnly'>;
@@ -314,6 +318,8 @@ export class LanguageService {
       return {spans: [], endOfLineState: ts.EndOfLineState.None};
     }
 
+    let spans: number[];
+    let endOfLineState: ts.EndOfLineState = ts.EndOfLineState.None;
     if (isTypeScriptFile(fileName)) {
       const sf = compiler.getCurrentProgram().getSourceFile(fileName);
       if (sf === undefined) {
@@ -343,21 +349,22 @@ export class LanguageService {
         }
       }
 
-      const spans = [];
+      spans = [];
       for (const templInfo of typeCheckInfos) {
         const classifications = getClassificationsForTemplate(compiler, templInfo, span);
         spans.push(...classifications.spans);
       }
-
-      return {spans, endOfLineState: ts.EndOfLineState.None};
+      const typescriptSpans = getClassificationsForTypescript(compiler, sf, span);
+      spans.push(...typescriptSpans.spans);
     } else {
       const typeCheckInfo = getTypeCheckInfoAtPosition(fileName, span.start, compiler);
       if (typeCheckInfo === undefined) {
-        return {spans: [], endOfLineState: ts.EndOfLineState.None};
+        return {spans: [], endOfLineState};
       }
 
-      return getClassificationsForTemplate(compiler, typeCheckInfo, span);
+      ({spans, endOfLineState} = getClassificationsForTemplate(compiler, typeCheckInfo, span));
     }
+    return {spans, endOfLineState};
   }
 
   getTokenTypeFromClassification(classification: number): number | undefined {

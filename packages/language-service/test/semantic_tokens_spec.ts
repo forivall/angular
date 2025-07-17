@@ -10,6 +10,7 @@ import ts from 'typescript';
 
 import {initMockFileSystem} from '@angular/compiler-cli/src/ngtsc/file_system/testing';
 import {LanguageServiceTestEnv, OpenBuffer} from '../testing';
+import type {Project} from '../testing';
 import {TokenEncodingConsts, TokenType, TokenModifier} from '../src/semantic_tokens';
 
 describe('semantic tokens', () => {
@@ -188,6 +189,50 @@ describe('semantic tokens', () => {
     const actual = templateFile.getEncodedSemanticClassifications();
     expectClassifications(templateFile, actual);
   });
+
+  it('should classify writable signal properties in typescript', () => {
+    const {classContentsStart, templateFile} = setupInlineTemplate('', 'bla = signal(true)', {
+      '__imports': 'import { signal } from "@angular/core";',
+    });
+    const actual = templateFile.getEncodedSemanticClassifications();
+    expectClassifications(templateFile, actual, semanticToken('signal', 'bla', classContentsStart));
+  });
+
+  it('should classify injected signal properties in typescript', () => {
+    const {classContentsStart, templateFile} = setupInlineTemplate(
+      '',
+      'bla = inject(INJECTED_SIGNAL)',
+      {
+        '__imports': 'import { inject } from "@angular/core";',
+        'INJECTED_SIGNAL': `
+          import { InjectionToken, signal } from "@angular/core";
+          export const INJECTED_SIGNAL = new InjectionToken('', {
+            providedIn: 'root',
+            factory: () => signal(false),
+          });
+        `,
+      },
+    );
+    const actual = templateFile.getEncodedSemanticClassifications();
+    expectClassifications(templateFile, actual, semanticToken('signal', 'bla', classContentsStart));
+  });
+
+  it('should classify viewChild', () => {
+    const {classContentsStart, templateFile, templateStart} = setupInlineTemplate(
+      '<test-comp />',
+      'bla = viewChild(TestComponent);',
+      {
+        '__imports': 'import { viewChild } from "@angular/core";',
+      },
+    );
+    const actual = templateFile.getEncodedSemanticClassifications();
+    expectClassifications(
+      templateFile,
+      actual,
+      semanticToken('class', 'test-comp', templateStart + 1),
+      semanticToken('signal.readonly', 'bla', classContentsStart),
+    );
+  });
 });
 
 function setup(
@@ -195,6 +240,8 @@ function setup(
   classContents: string = '',
   otherDeclarations: {[name: string]: string} = {},
 ): {
+  project: Project;
+  componentFile: OpenBuffer;
   templateFile: OpenBuffer;
 } {
   const decls = ['AppCmp', ...Object.keys(otherDeclarations)];
@@ -231,7 +278,11 @@ function setup(
          `,
     'test.html': template,
   });
-  return {templateFile: project.openFile('test.html')};
+  return {
+    project,
+    componentFile: project.openFile('test.ts'),
+    templateFile: project.openFile('test.html'),
+  };
 }
 
 function setupInlineTemplate(
@@ -239,10 +290,14 @@ function setupInlineTemplate(
   classContents: string = '',
   otherDeclarations: {[name: string]: string} = {},
 ): {
+  classContentsStart: number;
   templateFile: OpenBuffer;
   templateStart: number;
 } {
-  const decls = ['AppCmp', ...Object.keys(otherDeclarations)];
+  const decls = [
+    'AppCmp',
+    ...Object.keys(otherDeclarations).filter((name) => !name.startsWith('__')),
+  ];
 
   const otherDirectiveClassDecls = Object.values(otherDeclarations).join('\n\n');
 
@@ -276,7 +331,10 @@ function setupInlineTemplate(
          export class AppModule {}
          `,
   });
-  return {templateFile: project.openFile('test.ts'), templateStart: 123};
+  const templateFile = project.openFile('test.ts');
+  const templateStart = 123;
+  const classContentsStart = templateStart + template.length + 89;
+  return {classContentsStart, templateFile, templateStart};
 }
 
 function expectClassifications(
@@ -364,6 +422,8 @@ const TOKEN_TYPES: {[type: number]: string} = {
   [TokenType.property]: 'property',
   [TokenType.function]: 'function',
   [TokenType.member]: 'member',
+  [TokenType.signal]: 'signal',
+  [TokenType.inputSignal]: 'inputSignal',
 };
 
 /**

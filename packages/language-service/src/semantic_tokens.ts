@@ -7,6 +7,7 @@
  */
 
 import {
+  AST,
   TmplAstElement,
   TmplAstNode,
   TmplAstTemplate,
@@ -36,6 +37,7 @@ import {
   TmplAstComponent,
   TmplAstDirective,
   ParseSourceSpan,
+  R3Identifiers,
 } from '@angular/compiler';
 import type {TemplateTypeChecker} from '@angular/compiler-cli/src/ngtsc/typecheck/api';
 import {NgCompiler} from '@angular/compiler-cli/src/ngtsc/core';
@@ -68,6 +70,8 @@ export const enum TokenType {
   property,
   function,
   member,
+  signal = 142,
+  inputSignal = 143,
 }
 
 /**
@@ -81,6 +85,183 @@ export const enum TokenModifier {
   readonly,
   defaultLibrary,
   local,
+}
+
+function classifyAs(type: TokenType, modifiers: number = 0) {
+  return ((type + 1) << TokenEncodingConsts.typeOffset) + modifiers;
+}
+
+const tsSymbolToClassification = new WeakMap<ts.Symbol, number | null>();
+function classifyType(tsType: ts.Type, typeChecker?: ts.TypeChecker): number | null | undefined {
+  const typeSymbol = tsType.symbol || tsType.aliasSymbol;
+  if (!typeSymbol) {
+    return;
+  }
+  const classificationFromSymbol = classifyTypeSymbol(typeSymbol, typeChecker);
+  if (classificationFromSymbol !== undefined) {
+    return classificationFromSymbol;
+  }
+  const baseTypes = tsType.isIntersection() ? tsType.types : tsType.getBaseTypes();
+  if (baseTypes) {
+    for (const baseType of baseTypes) {
+      const classification = classifyType(baseType, typeChecker);
+      if (classification !== undefined) {
+        return classification;
+      }
+    }
+  }
+  return;
+}
+function classifyTypeSymbol(
+  typeSymbol: ts.Symbol,
+  typeChecker?: ts.TypeChecker,
+): number | null | undefined {
+  if (typeSymbol.flags & ts.SymbolFlags.Alias) {
+    const aliasSymbol = typeChecker?.getAliasedSymbol(typeSymbol);
+    return aliasSymbol && classifyTypeSymbol(aliasSymbol);
+  }
+  if (tsSymbolToClassification.has(typeSymbol)) {
+    return tsSymbolToClassification.get(typeSymbol);
+  }
+  const signalTypeName = typeSymbol.name;
+  if (/^(Input|Writable)Signal$/.test(signalTypeName)) {
+    const declarations = typeSymbol.getDeclarations();
+    if (declarations) {
+      for (const decl of declarations) {
+        if (decl.getSourceFile().fileName.includes(`/${R3Identifiers.core.moduleName}/`)) {
+          // TODO: warn that signal was not preloaded
+          const classification = classifyAs(
+            signalTypeName[0] === 'I' ? TokenType.inputSignal : TokenType.signal,
+            signalTypeName[0] === 'W' ? 0 : 1 << TokenModifier.readonly,
+          );
+          tsSymbolToClassification.set(typeSymbol, classification);
+          return classification;
+        }
+      }
+    }
+  }
+  if (!typeChecker) {
+    return;
+  }
+  // const declarations = typeSymbol.getDeclarations();
+  // if (declarations) {
+  //   for (const decl of declarations) {
+  //     if (ts.isInterfaceDeclaration(decl) && decl.heritageClauses) {
+  //       for (const clause of decl.heritageClauses) {
+  //         const superTypeSymbol = typeChecker.getSymbolAtLocation(clause);
+  //         const classification = classifyTypeSymbol(superTypeSymbol, typeChecker);
+  //       }
+  //     }
+  //     // if (decl.) decl.getSourceFile().moduleName;
+  //   }
+  // }
+  tsSymbolToClassification.set(typeSymbol, null);
+  return null;
+}
+
+function getAngularCoreSourceFileSymbol(program: ts.Program, sf?: ts.SourceFile) {
+  let ngCoreImport = sf?.statements.find(
+    (s): s is ts.ImportDeclaration =>
+      ts.isImportDeclaration(s) &&
+      (s.moduleSpecifier as ts.StringLiteral).text === R3Identifiers.core.moduleName,
+  );
+  if (!ngCoreImport) {
+    for (const sf of program.getSourceFiles()) {
+      if (program.isSourceFileFromExternalLibrary(sf)) {
+        continue;
+      }
+      ngCoreImport = sf.statements.find(
+        (s): s is ts.ImportDeclaration =>
+          ts.isImportDeclaration(s) &&
+          (s.moduleSpecifier as ts.StringLiteral).text === R3Identifiers.core.moduleName,
+      );
+      if (ngCoreImport) {
+        break;
+      }
+    }
+  }
+  if (ngCoreImport) {
+    const typeChecker = program.getTypeChecker();
+    const tsSymbol = typeChecker.getSymbolAtLocation(ngCoreImport.moduleSpecifier);
+    if (tsSymbol) {
+      return tsSymbol as ts.Symbol & {valueDeclaration: ts.SourceFile};
+    }
+  }
+  return;
+}
+
+function preloadSignalClassifications(program: ts.Program, sf?: ts.SourceFile) {
+  const ngCoreSymbol = getAngularCoreSourceFileSymbol(program, sf);
+  if (ngCoreSymbol?.exports) {
+    for (const signalTypeName of ['Signal', 'WritableSignal', 'InputSignal']) {
+      let signalSymbol = ngCoreSymbol.exports.get(signalTypeName as ts.__String);
+      if (signalSymbol) {
+        if (signalSymbol.flags & ts.SymbolFlags.Alias) {
+          signalSymbol = program.getTypeChecker().getAliasedSymbol(signalSymbol);
+        }
+        tsSymbolToClassification.set(
+          signalSymbol,
+          classifyAs(
+            signalTypeName[0] === 'I' ? TokenType.inputSignal : TokenType.signal,
+            signalTypeName[0] === 'W' ? 0 : 1 << TokenModifier.readonly,
+          ),
+        );
+      } else {
+        // TODO: warn that a signal type couldnt be preloaded
+      }
+    }
+  }
+}
+
+export function getClassificationsForTypescript(
+  compiler: NgCompiler,
+  sf: ts.SourceFile,
+  range: ts.TextSpan,
+): ts.Classifications {
+  const program = compiler.getCurrentProgram();
+  const typeChecker = program?.getTypeChecker();
+  if (!typeChecker) {
+    return {spans: [], endOfLineState: ts.EndOfLineState.None};
+  }
+  preloadSignalClassifications(program, sf);
+  const spans: number[] = [];
+  let inJSXElement = false;
+  function visitTs(node: ts.Node) {
+    if (!ts.textSpanIntersectsWith(range, node.getStart(), node.getWidth())) {
+      return;
+    }
+    const prevInJSXElement = inJSXElement;
+    if (ts.isJsxElement(node) || ts.isJsxSelfClosingElement(node)) {
+      inJSXElement = true;
+    }
+    if (ts.isJsxExpression(node)) {
+      inJSXElement = false;
+    }
+
+    if (
+      ts.isIdentifier(node) &&
+      !inJSXElement &&
+      !inImportClause(node) &&
+      !isInfinityOrNaNString(node.escapedText)
+    ) {
+      let symbol = typeChecker.getSymbolAtLocation(node);
+      if (symbol) {
+        if (symbol.flags & ts.SymbolFlags.Alias) {
+          symbol = typeChecker.getAliasedSymbol(symbol);
+        }
+        const tsType = typeChecker.getTypeOfSymbol(symbol);
+        const classification = classifyType(tsType, typeChecker);
+        if (classification) {
+          spans.push(node.getStart(), node.getWidth(), classification);
+        }
+      }
+    }
+    ts.forEachChild(node, visitTs);
+
+    inJSXElement = prevInJSXElement;
+  }
+  visitTs(sf);
+  return {spans, endOfLineState: ts.EndOfLineState.None};
 }
 
 export function getClassificationsForTemplate(
@@ -110,11 +291,15 @@ class ClassificationVisitor implements TmplAstVisitor {
     this.tags = templateTypeChecker.getElementsInFileScope(component);
   }
 
+  getSymbolOfNode(node: TmplAstNode | AST) {
+    return this.templateTypeChecker.getSymbolOfNode(node, this.component);
+  }
+
   getSpans(): number[] {
     return this.spans;
   }
 
-  visit(node: TmplAstNode | null) {
+  visit(node: TmplAstNode | null | undefined) {
     if (node && this.rangeIntersectsWith(node.sourceSpan)) {
       node.visit(this);
     }
@@ -126,12 +311,15 @@ class ClassificationVisitor implements TmplAstVisitor {
     // prevent classification of non-component directives that would be applied
     // to this element due to a matching selector
     const isComponent = potentialDirective && potentialDirective.isComponent;
-    const classification = this.classifyAs(TokenType.class);
+    const classification = classifyAs(TokenType.class);
 
     if (isComponent && this.rangeIntersectsWith(element.startSourceSpan)) {
       this.spans.push(element.startSourceSpan.start.offset + 1, tag.length, classification);
     }
 
+    this.visitAll(element.inputs);
+    this.visitAll(element.outputs);
+    this.visitAll(element.directives);
     this.visitAll(element.children);
 
     if (isComponent && !element.isSelfClosing && this.rangeIntersectsWith(element.endSourceSpan!)) {
@@ -143,7 +331,9 @@ class ClassificationVisitor implements TmplAstVisitor {
     this.visitAll(content.children);
   }
 
-  visitVariable(variable: TmplAstVariable) {}
+  visitVariable(variable: TmplAstVariable) {
+    const symbol = this.getSymbolOfNode(variable);
+  }
   visitReference(reference: TmplAstReference) {}
   visitTextAttribute(attribute: TmplAstTextAttribute) {}
   visitBoundAttribute(attribute: TmplAstBoundAttribute) {}
@@ -153,6 +343,9 @@ class ClassificationVisitor implements TmplAstVisitor {
   visitIcu(icu: TmplAstIcu) {}
 
   visitDeferredBlock(deferred: TmplAstDeferredBlock) {
+    this.visit(deferred.hydrateTriggers.when);
+    this.visit(deferred.triggers.when);
+    this.visit(deferred.prefetchTriggers.when);
     this.visitAll(deferred.children);
     this.visit(deferred.error);
     this.visit(deferred.loading);
@@ -182,6 +375,7 @@ class ClassificationVisitor implements TmplAstVisitor {
   }
 
   visitForLoopBlock(block: TmplAstForLoopBlock) {
+    // TODO: visit .item and .contextVariables if we can get the symbol type of the variable
     this.visitAll(block.children);
     this.visit(block.empty);
   }
@@ -196,10 +390,15 @@ class ClassificationVisitor implements TmplAstVisitor {
 
   visitIfBlockBranch(block: TmplAstIfBlockBranch) {
     this.visitAll(block.children);
+    // TODO: visit .expressionAlias if variables have symbol type
   }
 
   visitTemplate(template: TmplAstTemplate) {
+    this.visitAll(template.inputs);
+    this.visitAll(template.outputs);
+    this.visitAll(template.directives);
     this.visitAll(template.children);
+    // TODO: visit variables if we can get the symbol type of the variable
   }
 
   visitUnknownBlock(block: TmplAstUnknownBlock) {}
@@ -219,8 +418,15 @@ class ClassificationVisitor implements TmplAstVisitor {
     const length = span.end.offset - start;
     return ts.textSpanIntersectsWith(this.range, start, length);
   }
+}
 
-  private classifyAs(type: TokenType, modifiers: number = 0) {
-    return ((type + 1) << TokenEncodingConsts.typeOffset) + modifiers;
-  }
+export function inImportClause(node: ts.Node): boolean {
+  const parent = node.parent;
+  return (
+    parent &&
+    (ts.isImportClause(parent) || ts.isImportSpecifier(parent) || ts.isNamespaceImport(parent))
+  );
+}
+export function isInfinityOrNaNString(name: string | ts.__String): boolean {
+  return name === 'Infinity' || name === '-Infinity' || name === 'NaN';
 }

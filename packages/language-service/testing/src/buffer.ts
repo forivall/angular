@@ -46,6 +46,10 @@ export class OpenBuffer {
     }
   }
 
+  get span(): ts.TextSpan {
+    return {start: 0, length: this.scriptInfo.getSnapshot().getLength()};
+  }
+
   /**
    * Find a snippet of text within the given buffer and position the cursor within it.
    *

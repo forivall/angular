@@ -230,6 +230,7 @@ export function create(info: ts.server.PluginCreateInfo): NgLanguageService {
       );
     }
   }
+
   /**
    * Gets global diagnostics related to the program configuration and compiler options.
    */
