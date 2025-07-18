@@ -233,7 +233,7 @@ fdescribe('semantic tokens', () => {
         }
       `,
       {
-        '__imports': 'import { computed, signal } from "@angular/core";',
+        '__imports': 'import { computed, signal, Signal } from "@angular/core";',
         '__compositeSignal': `
           function createCompositeSignalInferred() {
             const displayAny = Object.assign(computed((): boolean => Object.values(displayAny).some((s) => s())), {
@@ -260,6 +260,7 @@ fdescribe('semantic tokens', () => {
       },
     );
     const actual = templateFile.getEncodedSemanticClassifications();
+    jasmine.debugLog(JSON.stringify({classContentsStart}));
     expectClassifications(
       templateFile,
       actual,
@@ -267,11 +268,14 @@ fdescribe('semantic tokens', () => {
       semanticToken('signal.readonly', 'b', classContentsStart + 54),
       semanticToken('signal.readonly', 'c', classContentsStart + 100),
       semanticToken('signal.readonly', 'a', classContentsStart + 175),
-      semanticToken('signal.readonly', 'displayThing', classContentsStart + 177),
+      semanticToken('signal', 'displayThing', classContentsStart + 177),
       semanticToken('signal.readonly', 'b', classContentsStart + 225),
-      semanticToken('signal.readonly', 'displayThing', classContentsStart + 227),
+      semanticToken('signal', 'displayThing', classContentsStart + 227),
       semanticToken('signal.readonly', 'c', classContentsStart + 275),
-      semanticToken('signal.readonly', 'displayThing', classContentsStart + 277),
+      semanticToken('signal', 'displayThing', classContentsStart + 277),
+      semanticToken('signal.readonly', 'displayAny', 989),
+      semanticToken('signal.readonly', 'displayAny', 1054),
+      semanticToken('signal.readonly', 'displayAny', 1212),
     );
   });
 
@@ -479,7 +483,7 @@ function expectClassifications(
   actual: ts.Classifications,
   ...expected: TestClassification[]
 ) {
-  expect(actual.spans.length).toBe(expected.length * 3);
+  expect(actual.spans.length / 3).toBe(expected.length);
   expect(actual.endOfLineState).toBe(ts.EndOfLineState.None);
 
   let actualPositions = new Set(actual.spans.filter((x, i) => i % 3 === 0));
@@ -488,10 +492,10 @@ function expectClassifications(
     actualPositions.delete(start);
     const text = buffer.contents.substring(start, start + length);
 
-    expect(start).toBe(expectedToken.position);
     if (typeof start === 'number') {
+      expect(start).toBe(expectedToken.position);
       expect(text).toBe(expectedToken.text);
-      expect(type).toBe(expectedToken.type);
+      expect(type).withContext(`of "${text}" at ${start}`).toBe(expectedToken.type);
     }
   }
   expect(

@@ -105,46 +105,94 @@ function classifyAs(type: TokenType, modifiers: number = 0) {
 
 const classifications = new WeakMap<ts.Symbol | ts.Type, number | null>();
 const signalTypeIntersectionItems = new WeakMap<ts.Symbol, ts.IntersectionType>();
-function classifyType(tsType: ts.Type, typeChecker?: ts.TypeChecker): number | null | undefined {
+function classifyType(tsType: ts.Type, typeChecker: ts.TypeChecker): number | null | undefined {
   if (classifications.has(tsType)) {
     return classifications.get(tsType);
   }
   let typeSymbol = tsType.symbol || tsType.aliasSymbol;
-  if (!typeSymbol) {
-    const baseTypes = tsType.isIntersection() ? tsType.types : tsType.getBaseTypes();
-    if (baseTypes) {
-      const parentTypes = baseTypes
-        .map((baseType) => signalTypeIntersectionItems.get(baseType.symbol))
-        .reduce(
-          (acc, intersectionType) =>
-            intersectionType
-              ? acc.set(intersectionType, (acc.get(intersectionType) ?? 0) + 1)
-              : acc,
-          new Map<ts.IntersectionType, number>(),
-        );
-      for (const [parentType, matchedItems] of parentTypes) {
-        if (parentType.types.length === matchedItems) {
-          typeSymbol = parentType.symbol || parentType.aliasSymbol;
-        }
+  let classification: number | null | undefined;
+  if (typeSymbol) {
+    classification = classifyTypeSymbol(typeSymbol, typeChecker);
+    if (classification != null) {
+      classifications.set(tsType, classification);
+      return classification;
+    }
+  }
+  if (tsType.isIntersection()) {
+    const typeSymbolFromIntersection = getSignalSymbolFromIntersection(tsType);
+    if (typeSymbolFromIntersection) {
+      classification = classifyTypeSymbol(typeSymbolFromIntersection, typeChecker);
+      if (classification !== undefined) {
+        classifications.set(tsType, classification);
+        return classification;
+      }
+    }
+    for (const baseType of tsType.types) {
+      const baseClassification = classifyType(baseType, typeChecker);
+      if (baseClassification) {
+        return classification;
       }
     }
   }
-  if (typeSymbol) {
-    const classificationFromSymbol = classifyTypeSymbol(typeSymbol, typeChecker);
-    if (classificationFromSymbol !== undefined) {
-      classifications.set(tsType, classificationFromSymbol);
-      return classificationFromSymbol;
+  if (tsType.isClassOrInterface()) {
+    classification = classifyInterfaceType(tsType, typeChecker);
+    if (classification !== undefined) {
+      classifications.set(tsType, classification);
+      return classification;
+    }
+  }
+  return;
+}
+function getSignalSymbolFromIntersection(tsType: ts.IntersectionType) {
+  const parentTypes = tsType.types
+    .map((baseType) => signalTypeIntersectionItems.get(baseType.symbol))
+    .reduce(
+      (acc, intersectionType) =>
+        intersectionType ? acc.set(intersectionType, (acc.get(intersectionType) ?? 0) + 1) : acc,
+      new Map<ts.IntersectionType, number>(),
+    );
+  for (const [parentType, matchedItems] of parentTypes) {
+    if (parentType.types.length === matchedItems) {
+      return parentType.symbol || parentType.aliasSymbol;
+    }
+  }
+  // alternatively to this technique, we could look at the source file for the intersection items
+  // and walk up the parents of `baseType.symbol.declarations[0]` to find which signal type it's part of.
+  return;
+}
+function classifyInterfaceType(tsType: ts.InterfaceType, typeChecker: ts.TypeChecker) {
+  const typeSymbol = tsType.symbol;
+  const declarations = typeSymbol.getDeclarations();
+  if (declarations) {
+    // TODO: improve, see if we can just look at the tsType
+    for (const decl of declarations) {
+      if (ts.isInterfaceDeclaration(decl) && decl.heritageClauses) {
+        for (const clause of decl.heritageClauses) {
+          for (const baseTypeNode of clause.types) {
+            const baseTypeIdentifier = ts.isExpressionWithTypeArguments(baseTypeNode)
+              ? baseTypeNode.expression
+              : baseTypeNode;
+            const superTypeSymbol = typeChecker.getSymbolAtLocation(baseTypeIdentifier);
+            if (superTypeSymbol) {
+              const classification = classifyTypeSymbol(superTypeSymbol, typeChecker);
+              if (classification != null) {
+                return classification;
+              }
+            }
+          }
+        }
+      }
     }
   }
   return;
 }
 function classifyTypeSymbol(
   typeSymbol: ts.Symbol,
-  typeChecker?: ts.TypeChecker,
+  typeChecker: ts.TypeChecker,
 ): number | null | undefined {
   if (typeSymbol.flags & ts.SymbolFlags.Alias) {
-    const aliasSymbol = typeChecker?.getAliasedSymbol(typeSymbol);
-    return aliasSymbol && classifyTypeSymbol(aliasSymbol);
+    const aliasSymbol = typeChecker.getAliasedSymbol(typeSymbol);
+    return aliasSymbol && classifyTypeSymbol(aliasSymbol, typeChecker);
   }
   if (classifications.has(typeSymbol)) {
     const precomputedClassification = classifications.get(typeSymbol);
@@ -185,18 +233,6 @@ function classifyTypeSymbol(
   if (!typeChecker) {
     return;
   }
-  // const declarations = typeSymbol.getDeclarations();
-  // if (declarations) {
-  //   for (const decl of declarations) {
-  //     if (ts.isInterfaceDeclaration(decl) && decl.heritageClauses) {
-  //       for (const clause of decl.heritageClauses) {
-  //         const superTypeSymbol = typeChecker.getSymbolAtLocation(clause);
-  //         const classification = classifyTypeSymbol(superTypeSymbol, typeChecker);
-  //       }
-  //     }
-  //     // if (decl.) decl.getSourceFile().moduleName;
-  //   }
-  // }
   classifications.set(typeSymbol, null);
   return null;
 }
