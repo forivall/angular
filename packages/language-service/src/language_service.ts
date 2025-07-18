@@ -318,6 +318,7 @@ export class LanguageService {
       return {spans: [], endOfLineState: ts.EndOfLineState.None};
     }
 
+    debugger;
     let spans: number[];
     let endOfLineState: ts.EndOfLineState = ts.EndOfLineState.None;
     if (isTypeScriptFile(fileName)) {

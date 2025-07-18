@@ -7,37 +7,40 @@
  */
 
 import {
+  AbsoluteSourceSpan,
   AST,
-  TmplAstElement,
-  TmplAstNode,
-  TmplAstTemplate,
-  TmplAstVisitor,
+  ParseSourceSpan,
+  PropertyRead,
+  R3Identifiers,
+  RecursiveAstVisitor,
   TmplAstBoundAttribute,
   TmplAstBoundEvent,
   TmplAstBoundText,
+  TmplAstComponent,
   TmplAstContent,
   TmplAstDeferredBlock,
   TmplAstDeferredBlockError,
   TmplAstDeferredBlockLoading,
   TmplAstDeferredBlockPlaceholder,
   TmplAstDeferredTrigger,
+  TmplAstDirective,
+  TmplAstElement,
   TmplAstForLoopBlock,
   TmplAstForLoopBlockEmpty,
   TmplAstIcu,
   TmplAstIfBlock,
   TmplAstIfBlockBranch,
   TmplAstLetDeclaration,
+  TmplAstNode,
   TmplAstReference,
   TmplAstSwitchBlock,
   TmplAstSwitchBlockCase,
+  TmplAstTemplate,
   TmplAstText,
   TmplAstTextAttribute,
   TmplAstUnknownBlock,
   TmplAstVariable,
-  TmplAstComponent,
-  TmplAstDirective,
-  ParseSourceSpan,
-  R3Identifiers,
+  TmplAstVisitor,
 } from '@angular/compiler';
 import type {TemplateTypeChecker} from '@angular/compiler-cli/src/ngtsc/typecheck/api';
 import {NgCompiler} from '@angular/compiler-cli/src/ngtsc/core';
@@ -87,27 +90,50 @@ export const enum TokenModifier {
   local,
 }
 
+/** @see {@link /packages/compiler-cli/src/ngtsc/typecheck/src/symbol_util} */
+const SIGNAL_FNS = new Set([
+  'WritableSignal',
+  'Signal',
+  'InputSignal',
+  'InputSignalWithTransform',
+  'ModelSignal',
+]);
+
 function classifyAs(type: TokenType, modifiers: number = 0) {
   return ((type + 1) << TokenEncodingConsts.typeOffset) + modifiers;
 }
 
-const tsSymbolToClassification = new WeakMap<ts.Symbol, number | null>();
+const classifications = new WeakMap<ts.Symbol | ts.Type, number | null>();
+const signalTypeIntersectionItems = new WeakMap<ts.Symbol, ts.IntersectionType>();
 function classifyType(tsType: ts.Type, typeChecker?: ts.TypeChecker): number | null | undefined {
-  const typeSymbol = tsType.symbol || tsType.aliasSymbol;
+  if (classifications.has(tsType)) {
+    return classifications.get(tsType);
+  }
+  let typeSymbol = tsType.symbol || tsType.aliasSymbol;
   if (!typeSymbol) {
-    return;
-  }
-  const classificationFromSymbol = classifyTypeSymbol(typeSymbol, typeChecker);
-  if (classificationFromSymbol !== undefined) {
-    return classificationFromSymbol;
-  }
-  const baseTypes = tsType.isIntersection() ? tsType.types : tsType.getBaseTypes();
-  if (baseTypes) {
-    for (const baseType of baseTypes) {
-      const classification = classifyType(baseType, typeChecker);
-      if (classification !== undefined) {
-        return classification;
+    const baseTypes = tsType.isIntersection() ? tsType.types : tsType.getBaseTypes();
+    if (baseTypes) {
+      const parentTypes = baseTypes
+        .map((baseType) => signalTypeIntersectionItems.get(baseType.symbol))
+        .reduce(
+          (acc, intersectionType) =>
+            intersectionType
+              ? acc.set(intersectionType, (acc.get(intersectionType) ?? 0) + 1)
+              : acc,
+          new Map<ts.IntersectionType, number>(),
+        );
+      for (const [parentType, matchedItems] of parentTypes) {
+        if (parentType.types.length === matchedItems) {
+          typeSymbol = parentType.symbol || parentType.aliasSymbol;
+        }
       }
+    }
+  }
+  if (typeSymbol) {
+    const classificationFromSymbol = classifyTypeSymbol(typeSymbol, typeChecker);
+    if (classificationFromSymbol !== undefined) {
+      classifications.set(tsType, classificationFromSymbol);
+      return classificationFromSymbol;
     }
   }
   return;
@@ -120,23 +146,39 @@ function classifyTypeSymbol(
     const aliasSymbol = typeChecker?.getAliasedSymbol(typeSymbol);
     return aliasSymbol && classifyTypeSymbol(aliasSymbol);
   }
-  if (tsSymbolToClassification.has(typeSymbol)) {
-    return tsSymbolToClassification.get(typeSymbol);
+  if (classifications.has(typeSymbol)) {
+    const precomputedClassification = classifications.get(typeSymbol);
+    if (precomputedClassification) {
+      // debugger;
+    }
+    return precomputedClassification;
   }
   const signalTypeName = typeSymbol.name;
-  if (/^(Input|Writable)Signal$/.test(signalTypeName)) {
+  if (SIGNAL_FNS.has(signalTypeName)) {
     const declarations = typeSymbol.getDeclarations();
     if (declarations) {
-      for (const decl of declarations) {
-        if (decl.getSourceFile().fileName.includes(`/${R3Identifiers.core.moduleName}/`)) {
-          // TODO: warn that signal was not preloaded
-          const classification = classifyAs(
-            signalTypeName[0] === 'I' ? TokenType.inputSignal : TokenType.signal,
-            signalTypeName[0] === 'W' ? 0 : 1 << TokenModifier.readonly,
-          );
-          tsSymbolToClassification.set(typeSymbol, classification);
-          return classification;
-        }
+      const isSignalSymbol = declarations.some((decl) => {
+        const fileName = decl.getSourceFile().fileName;
+
+        return (
+          (ts.isInterfaceDeclaration(decl) || ts.isTypeAliasDeclaration(decl)) &&
+          SIGNAL_FNS.has(decl.name.text) &&
+          (fileName.includes('@angular/core') ||
+            fileName.includes('angular2/rc/packages/core') ||
+            fileName.includes('bin/packages/core')) // for local usage in some tests
+        );
+      });
+      if (isSignalSymbol) {
+        // TODO: warn that signal was not preloaded
+        const classification = classifyAs(
+          signalTypeName[0] === 'I' ? TokenType.inputSignal : TokenType.signal,
+          signalTypeName[0] === 'W' ? 0 : 1 << TokenModifier.readonly,
+        );
+        classifications.set(typeSymbol, classification);
+        return classification;
+      } else {
+        classifications.set(typeSymbol, null);
+        return null;
       }
     }
   }
@@ -155,11 +197,12 @@ function classifyTypeSymbol(
   //     // if (decl.) decl.getSourceFile().moduleName;
   //   }
   // }
-  tsSymbolToClassification.set(typeSymbol, null);
+  classifications.set(typeSymbol, null);
   return null;
 }
 
 function getAngularCoreSourceFileSymbol(program: ts.Program, sf?: ts.SourceFile) {
+  program.getSemanticDiagnostics;
   let ngCoreImport = sf?.statements.find(
     (s): s is ts.ImportDeclaration =>
       ts.isImportDeclaration(s) &&
@@ -191,21 +234,29 @@ function getAngularCoreSourceFileSymbol(program: ts.Program, sf?: ts.SourceFile)
 }
 
 function preloadSignalClassifications(program: ts.Program, sf?: ts.SourceFile) {
+  const typeChecker = program.getTypeChecker();
   const ngCoreSymbol = getAngularCoreSourceFileSymbol(program, sf);
   if (ngCoreSymbol?.exports) {
-    for (const signalTypeName of ['Signal', 'WritableSignal', 'InputSignal']) {
+    for (const signalTypeName of SIGNAL_FNS) {
       let signalSymbol = ngCoreSymbol.exports.get(signalTypeName as ts.__String);
       if (signalSymbol) {
         if (signalSymbol.flags & ts.SymbolFlags.Alias) {
           signalSymbol = program.getTypeChecker().getAliasedSymbol(signalSymbol);
         }
-        tsSymbolToClassification.set(
+        classifications.set(
           signalSymbol,
           classifyAs(
             signalTypeName[0] === 'I' ? TokenType.inputSignal : TokenType.signal,
             signalTypeName[0] === 'W' ? 0 : 1 << TokenModifier.readonly,
           ),
         );
+        const signalDeclaration = signalSymbol.declarations?.[0];
+        const signalType = signalDeclaration && typeChecker?.getTypeAtLocation(signalDeclaration);
+        if (signalType?.isIntersection()) {
+          for (const intersectionElement of signalType.types) {
+            signalTypeIntersectionItems.set(intersectionElement.symbol, signalType);
+          }
+        }
       } else {
         // TODO: warn that a signal type couldnt be preloaded
       }
@@ -242,7 +293,8 @@ export function getClassificationsForTypescript(
       ts.isIdentifier(node) &&
       !inJSXElement &&
       !inImportClause(node) &&
-      !isInfinityOrNaNString(node.escapedText)
+      !isInfinityOrNaNString(node.escapedText) &&
+      !(ts.isPropertyAssignment(node.parent) && node === node.parent.name)
     ) {
       let symbol = typeChecker.getSymbolAtLocation(node);
       if (symbol) {
@@ -416,6 +468,31 @@ class ClassificationVisitor implements TmplAstVisitor {
   private rangeIntersectsWith(span: ParseSourceSpan) {
     const start = span.start.offset;
     const length = span.end.offset - start;
+    return ts.textSpanIntersectsWith(this.range, start, length);
+  }
+}
+
+class TmplExpressionClassificationVisitor extends RecursiveAstVisitor {
+  constructor(
+    private templateTypeChecker: TemplateTypeChecker,
+    private component: ts.ClassDeclaration,
+    private range: ts.TextSpan,
+  ) {
+    super();
+  }
+
+  override visit(ast: AST, context?: any) {
+    if (ast && this.rangeIntersectsWith(ast.sourceSpan)) {
+      ast.visit(this);
+    }
+  }
+  override visitPropertyRead(ast: PropertyRead, context: TmplAstNode) {
+    debugger;
+  }
+
+  private rangeIntersectsWith(span: AbsoluteSourceSpan) {
+    const start = span.start;
+    const length = span.end - start;
     return ts.textSpanIntersectsWith(this.range, start, length);
   }
 }

@@ -13,7 +13,8 @@ import {LanguageServiceTestEnv, OpenBuffer} from '../testing';
 import type {Project} from '../testing';
 import {TokenEncodingConsts, TokenType, TokenModifier} from '../src/semantic_tokens';
 
-describe('semantic tokens', () => {
+debugger;
+fdescribe('semantic tokens', () => {
   beforeEach(() => {
     initMockFileSystem('Native');
   });
@@ -191,11 +192,147 @@ describe('semantic tokens', () => {
   });
 
   it('should classify writable signal properties in typescript', () => {
-    const {classContentsStart, templateFile} = setupInlineTemplate('', 'bla = signal(true)', {
-      '__imports': 'import { signal } from "@angular/core";',
+    const {classContentsStart, templateFile} = setupInlineTemplate(
+      '',
+      `
+        bla = signal(true);
+        blah = linkedSignal({
+          source: this.bla,
+          computation: (value, prev): boolean | undefined => value && prev?.value
+        });
+        toggle() {
+          this.bla.update((value) => !value);
+        }
+      `,
+      {
+        '__imports': 'import { linkedSignal, signal } from "@angular/core";',
+      },
+    );
+    const actual = templateFile.getEncodedSemanticClassifications();
+    expectClassifications(
+      templateFile,
+      actual,
+      semanticToken('signal', 'bla', classContentsStart + 9),
+      semanticToken('signal', 'blah', classContentsStart + 37),
+      semanticToken('signal', 'bla', classContentsStart + 82),
+      semanticToken('signal', 'bla', classContentsStart + 215),
+    );
+  });
+
+  fit('should classify composite signals in typescript', () => {
+    const {classContentsStart, templateFile} = setupInlineTemplate(
+      '',
+      `
+        a = createCompositeSignalInferred();
+        b = createCompositeSignalInterface();
+        c = createCompositeSignalIntersection();
+        toggle() {
+          this.a.displayThing((value) => !value);
+          this.b.displayThing((value) => !value);
+          this.c.displayThing((value) => !value);
+        }
+      `,
+      {
+        '__imports': 'import { computed, signal } from "@angular/core";',
+        '__compositeSignal': `
+          function createCompositeSignalInferred() {
+            const displayAny = Object.assign(computed((): boolean => Object.values(displayAny).some((s) => s())), {
+              displayThing: signal(true),
+              displayOtherThing: signal(false),
+            });
+            return displayAny;
+          }
+          interface ICompositeSignal extends Signal<boolean> {
+            displayThing: WritableSignal<boolean>;
+            displayOtherThing: WritableSignal<boolean>;
+          }
+          function createCompositeSignalInterface(): ICompositeSignal {
+            return createCompositeSignalInferred();
+          }
+          type TCompositeSignal = Signal<boolean> & {
+            displayThing: WritableSignal<boolean>;
+            displayOtherThing: WritableSignal<boolean>;
+          }
+          function createCompositeSignalIntersection(): TCompositeSignal {
+            return createCompositeSignalInferred();
+          }
+        `,
+      },
+    );
+    const actual = templateFile.getEncodedSemanticClassifications();
+    expectClassifications(
+      templateFile,
+      actual,
+      semanticToken('signal.readonly', 'a', classContentsStart + 9),
+      semanticToken('signal.readonly', 'b', classContentsStart + 54),
+      semanticToken('signal.readonly', 'c', classContentsStart + 100),
+      semanticToken('signal.readonly', 'a', classContentsStart + 175),
+      semanticToken('signal.readonly', 'displayThing', classContentsStart + 177),
+      semanticToken('signal.readonly', 'b', classContentsStart + 225),
+      semanticToken('signal.readonly', 'displayThing', classContentsStart + 227),
+      semanticToken('signal.readonly', 'c', classContentsStart + 275),
+      semanticToken('signal.readonly', 'displayThing', classContentsStart + 277),
+    );
+  });
+
+  it('should classify input signal properties in typescript', () => {
+    const {classContentsStart, templateFile} = setupInlineTemplate('', 'bla = input(true)', {
+      '__imports': 'import { input } from "@angular/core";',
     });
     const actual = templateFile.getEncodedSemanticClassifications();
-    expectClassifications(templateFile, actual, semanticToken('signal', 'bla', classContentsStart));
+    expectClassifications(
+      templateFile,
+      actual,
+      semanticToken('inputSignal.readonly', 'bla', classContentsStart),
+    );
+  });
+
+  it('should classify computed signal properties in typescript', () => {
+    const {classContentsStart, templateFile} = setupInlineTemplate(
+      '',
+      `
+        bla = signal(true);
+        notBla = computed(() => !this.bla());
+      `,
+      {
+        '__imports': 'import { computed, signal } from "@angular/core";',
+      },
+    );
+    const actual = templateFile.getEncodedSemanticClassifications();
+    expectClassifications(
+      templateFile,
+      actual,
+      semanticToken('signal', 'bla', classContentsStart + 9),
+      semanticToken('signal.readonly', 'notBla', classContentsStart + 37),
+      semanticToken('signal', 'bla', classContentsStart + 67),
+    );
+  });
+
+  it('should classify injected readonly signal properties in typescript', () => {
+    const {classContentsStart, templateFile} = setupInlineTemplate(
+      '',
+      'bla = inject(INJECTED_READONLY_SIGNAL)',
+      {
+        '__imports': 'import { inject } from "@angular/core";',
+        'INJECTED_SIGNAL': `
+          import { InjectionToken, signal } from "@angular/core";
+          export const INJECTED_SIGNAL = new InjectionToken('', {
+            providedIn: 'root',
+            factory: () => signal(false),
+          });
+          export const INJECTED_READONLY_SIGNAL = new InjectionToken('', {
+            providedIn: 'root',
+            factory: () => inject(INJECTED_SIGNAL).asReadonly(),
+          });
+        `,
+      },
+    );
+    const actual = templateFile.getEncodedSemanticClassifications();
+    expectClassifications(
+      templateFile,
+      actual,
+      semanticToken('signal.readonly', 'bla', classContentsStart),
+    );
   });
 
   it('should classify injected signal properties in typescript', () => {
@@ -345,14 +482,31 @@ function expectClassifications(
   expect(actual.spans.length).toBe(expected.length * 3);
   expect(actual.endOfLineState).toBe(ts.EndOfLineState.None);
 
+  let actualPositions = new Set(actual.spans.filter((x, i) => i % 3 === 0));
   for (const expectedToken of expected) {
     const {start, length, type} = findTokenAtPosition(actual.spans, expectedToken.position);
+    actualPositions.delete(start);
     const text = buffer.contents.substring(start, start + length);
 
     expect(start).toBe(expectedToken.position);
-    expect(text).toBe(expectedToken.text);
-    expect(type).toBe(expectedToken.type);
+    if (typeof start === 'number') {
+      expect(text).toBe(expectedToken.text);
+      expect(type).toBe(expectedToken.type);
+    }
   }
+  expect(
+    [...actualPositions].map((pos) => {
+      const found = findTokenAtPosition(actual.spans, pos);
+      const {start, length} = found;
+      const context = 6;
+      return {
+        ...found,
+        after: buffer.contents.substring(start - context, start),
+        before: buffer.contents.substring(start + length, start + length + context),
+        contents: buffer.contents.substring(start, start + length),
+      };
+    }),
+  ).toHaveSize(0);
 }
 
 interface TestClassification {
