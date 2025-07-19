@@ -110,9 +110,8 @@ function classifyType(tsType: ts.Type, typeChecker: ts.TypeChecker): number | nu
     return classifications.get(tsType);
   }
   let typeSymbol = tsType.symbol || tsType.aliasSymbol;
-  let classification: number | null | undefined;
   if (typeSymbol) {
-    classification = classifyTypeSymbol(typeSymbol, typeChecker);
+    const classification = classifyTypeSymbolFromAngularCoreOrCache(typeSymbol, typeChecker);
     if (classification != null) {
       classifications.set(tsType, classification);
       return classification;
@@ -121,7 +120,10 @@ function classifyType(tsType: ts.Type, typeChecker: ts.TypeChecker): number | nu
   if (tsType.isIntersection()) {
     const typeSymbolFromIntersection = getSignalSymbolFromIntersection(tsType);
     if (typeSymbolFromIntersection) {
-      classification = classifyTypeSymbol(typeSymbolFromIntersection, typeChecker);
+      const classification = classifyTypeSymbolFromAngularCoreOrCache(
+        typeSymbolFromIntersection,
+        typeChecker,
+      );
       if (classification !== undefined) {
         classifications.set(tsType, classification);
         return classification;
@@ -129,19 +131,33 @@ function classifyType(tsType: ts.Type, typeChecker: ts.TypeChecker): number | nu
     }
     for (const baseType of tsType.types) {
       const baseClassification = classifyType(baseType, typeChecker);
-      if (baseClassification) {
-        return classification;
+      if (baseClassification != null) {
+        classifications.set(tsType, baseClassification);
+        if (typeSymbol) {
+          classifications.set(typeSymbol, baseClassification);
+        }
+        return baseClassification;
       }
     }
   }
   if (tsType.isClassOrInterface()) {
-    classification = classifyInterfaceType(tsType, typeChecker);
-    if (classification !== undefined) {
-      classifications.set(tsType, classification);
-      return classification;
+    const baseTypes = typeChecker.getBaseTypes(tsType);
+    for (const baseType of baseTypes) {
+      const classification = classifyType(baseType, typeChecker);
+      if (classification != null) {
+        classifications.set(tsType, classification);
+        if (typeSymbol) {
+          classifications.set(typeSymbol, null);
+        }
+        return classification;
+      }
     }
   }
-  return;
+  classifications.set(tsType, null);
+  if (typeSymbol) {
+    classifications.set(typeSymbol, null);
+  }
+  return null;
 }
 function getSignalSymbolFromIntersection(tsType: ts.IntersectionType) {
   const parentTypes = tsType.types
@@ -162,44 +178,26 @@ function getSignalSymbolFromIntersection(tsType: ts.IntersectionType) {
 }
 function classifyInterfaceType(tsType: ts.InterfaceType, typeChecker: ts.TypeChecker) {
   const typeSymbol = tsType.symbol;
-  const declarations = typeSymbol.getDeclarations();
-  if (declarations) {
-    // TODO: improve, see if we can just look at the tsType
-    for (const decl of declarations) {
-      if (ts.isInterfaceDeclaration(decl) && decl.heritageClauses) {
-        for (const clause of decl.heritageClauses) {
-          for (const baseTypeNode of clause.types) {
-            const baseTypeIdentifier = ts.isExpressionWithTypeArguments(baseTypeNode)
-              ? baseTypeNode.expression
-              : baseTypeNode;
-            const superTypeSymbol = typeChecker.getSymbolAtLocation(baseTypeIdentifier);
-            if (superTypeSymbol) {
-              const classification = classifyTypeSymbol(superTypeSymbol, typeChecker);
-              if (classification != null) {
-                return classification;
-              }
-            }
-          }
-        }
-      }
+  const baseTypes = typeChecker.getBaseTypes(tsType);
+  for (const baseType of baseTypes) {
+    const classification = classifyType(baseType, typeChecker);
+    if (classification) {
+      return classification;
     }
   }
   return;
 }
-function classifyTypeSymbol(
+
+function classifyTypeSymbolFromAngularCoreOrCache(
   typeSymbol: ts.Symbol,
-  typeChecker: ts.TypeChecker,
+  typeChecker?: ts.TypeChecker,
 ): number | null | undefined {
-  if (typeSymbol.flags & ts.SymbolFlags.Alias) {
+  if (typeChecker && typeSymbol.flags & ts.SymbolFlags.Alias) {
     const aliasSymbol = typeChecker.getAliasedSymbol(typeSymbol);
-    return aliasSymbol && classifyTypeSymbol(aliasSymbol, typeChecker);
+    return aliasSymbol && classifyTypeSymbolFromAngularCoreOrCache(aliasSymbol);
   }
   if (classifications.has(typeSymbol)) {
-    const precomputedClassification = classifications.get(typeSymbol);
-    if (precomputedClassification) {
-      // debugger;
-    }
-    return precomputedClassification;
+    return classifications.get(typeSymbol);
   }
   const signalTypeName = typeSymbol.name;
   if (SIGNAL_FNS.has(signalTypeName)) {
@@ -224,17 +222,10 @@ function classifyTypeSymbol(
         );
         classifications.set(typeSymbol, classification);
         return classification;
-      } else {
-        classifications.set(typeSymbol, null);
-        return null;
       }
     }
   }
-  if (!typeChecker) {
-    return;
-  }
-  classifications.set(typeSymbol, null);
-  return null;
+  return;
 }
 
 function getAngularCoreSourceFileSymbol(program: ts.Program, sf?: ts.SourceFile) {
@@ -330,7 +321,13 @@ export function getClassificationsForTypescript(
       !inJSXElement &&
       !inImportClause(node) &&
       !isInfinityOrNaNString(node.escapedText) &&
-      !(ts.isPropertyAssignment(node.parent) && node === node.parent.name)
+      !(
+        // This check adds feature parity with webstorm, which doesnt highlight property names in interfaces and object literals
+        (
+          (ts.isPropertyAssignment(node.parent) || ts.isPropertySignature(node.parent)) &&
+          node === node.parent.name
+        )
+      )
     ) {
       let symbol = typeChecker.getSymbolAtLocation(node);
       if (symbol) {

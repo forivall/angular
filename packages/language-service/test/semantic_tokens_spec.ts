@@ -233,7 +233,7 @@ fdescribe('semantic tokens', () => {
         }
       `,
       {
-        '__imports': 'import { computed, signal, Signal } from "@angular/core";',
+        '__imports': 'import { computed, signal, Signal, WritableSignal } from "@angular/core";',
         '__compositeSignal': `
           function createCompositeSignalInferred() {
             const displayAny = Object.assign(computed((): boolean => Object.values(displayAny).some((s) => s())), {
@@ -273,9 +273,9 @@ fdescribe('semantic tokens', () => {
       semanticToken('signal', 'displayThing', classContentsStart + 227),
       semanticToken('signal.readonly', 'c', classContentsStart + 275),
       semanticToken('signal', 'displayThing', classContentsStart + 277),
-      semanticToken('signal.readonly', 'displayAny', 989),
-      semanticToken('signal.readonly', 'displayAny', 1054),
-      semanticToken('signal.readonly', 'displayAny', 1212),
+      semanticToken('signal.readonly', 'displayAny', 1013),
+      semanticToken('signal.readonly', 'displayAny', 1078),
+      semanticToken('signal.readonly', 'displayAny', 1236),
     );
   });
 
@@ -483,17 +483,23 @@ function expectClassifications(
   actual: ts.Classifications,
   ...expected: TestClassification[]
 ) {
-  expect(actual.spans.length / 3).toBe(expected.length);
+  expect(actual.spans.length / 3)
+    .withContext('Number of classifications')
+    .toBe(expected.length);
   expect(actual.endOfLineState).toBe(ts.EndOfLineState.None);
 
   let actualPositions = new Set(actual.spans.filter((x, i) => i % 3 === 0));
   for (const expectedToken of expected) {
-    const {start, length, type} = findTokenAtPosition(actual.spans, expectedToken.position);
+    const {start, length, type} = findTokenAtPosition(
+      actual.spans,
+      expectedToken.position,
+      `"${expectedToken.text}" with type ${expectedToken.type}`,
+    );
     actualPositions.delete(start);
     const text = buffer.contents.substring(start, start + length);
 
     if (typeof start === 'number') {
-      expect(start).toBe(expectedToken.position);
+      expect(start).withContext('start').toBe(expectedToken.position);
       expect(text).toBe(expectedToken.text);
       expect(type).withContext(`of "${text}" at ${start}`).toBe(expectedToken.type);
     }
@@ -553,9 +559,11 @@ function convertToString(classification: number) {
   return [typeName, ...modifierNames].join('.');
 }
 
-function findTokenAtPosition(spans: number[], pos: number) {
+function findTokenAtPosition(spans: number[], pos: number, extraContext = '') {
   const idx = spans.findIndex((n, i) => i % 3 === 0 && pos === n);
-  expect(idx).withContext(`Expected token for position ${pos}`).toBeGreaterThanOrEqual(0);
+  expect(idx)
+    .withContext(`Expected token for position ${pos} ${extraContext}`)
+    .toBeGreaterThanOrEqual(0);
 
   return {
     start: spans[idx],
