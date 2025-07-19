@@ -103,6 +103,7 @@ function classifyAs(type: TokenType, modifiers: number = 0) {
   return ((type + 1) << TokenEncodingConsts.typeOffset) + modifiers;
 }
 
+// TODO: move these below functions into a class
 const classifications = new WeakMap<ts.Symbol | ts.Type, number | null>();
 const signalTypeIntersectionItems = new WeakMap<ts.Symbol, ts.IntersectionType>();
 function classifyType(tsType: ts.Type, typeChecker: ts.TypeChecker): number | null | undefined {
@@ -176,18 +177,6 @@ function getSignalSymbolFromIntersection(tsType: ts.IntersectionType) {
   // and walk up the parents of `baseType.symbol.declarations[0]` to find which signal type it's part of.
   return;
 }
-function classifyInterfaceType(tsType: ts.InterfaceType, typeChecker: ts.TypeChecker) {
-  const typeSymbol = tsType.symbol;
-  const baseTypes = typeChecker.getBaseTypes(tsType);
-  for (const baseType of baseTypes) {
-    const classification = classifyType(baseType, typeChecker);
-    if (classification) {
-      return classification;
-    }
-  }
-  return;
-}
-
 function classifyTypeSymbolFromAngularCoreOrCache(
   typeSymbol: ts.Symbol,
   typeChecker?: ts.TypeChecker,
@@ -227,7 +216,6 @@ function classifyTypeSymbolFromAngularCoreOrCache(
   }
   return;
 }
-
 function getAngularCoreSourceFileSymbol(program: ts.Program, sf?: ts.SourceFile) {
   program.getSemanticDiagnostics;
   let ngCoreImport = sf?.statements.find(
@@ -259,7 +247,6 @@ function getAngularCoreSourceFileSymbol(program: ts.Program, sf?: ts.SourceFile)
   }
   return;
 }
-
 function preloadSignalClassifications(program: ts.Program, sf?: ts.SourceFile) {
   const typeChecker = program.getTypeChecker();
   const ngCoreSymbol = getAngularCoreSourceFileSymbol(program, sf);
