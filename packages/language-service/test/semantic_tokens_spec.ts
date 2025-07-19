@@ -13,7 +13,6 @@ import {LanguageServiceTestEnv, OpenBuffer} from '../testing';
 import type {Project} from '../testing';
 import {TokenEncodingConsts, TokenType, TokenModifier} from '../src/semantic_tokens';
 
-debugger;
 fdescribe('semantic tokens', () => {
   beforeEach(() => {
     initMockFileSystem('Native');
@@ -219,7 +218,7 @@ fdescribe('semantic tokens', () => {
     );
   });
 
-  fit('should classify composite signals in typescript', () => {
+  it('should classify composite readonly signals in typescript', () => {
     const {classContentsStart, templateFile} = setupInlineTemplate(
       '',
       `
@@ -260,7 +259,6 @@ fdescribe('semantic tokens', () => {
       },
     );
     const actual = templateFile.getEncodedSemanticClassifications();
-    jasmine.debugLog(JSON.stringify({classContentsStart}));
     expectClassifications(
       templateFile,
       actual,
@@ -276,6 +274,59 @@ fdescribe('semantic tokens', () => {
       semanticToken('signal.readonly', 'displayAny', 1013),
       semanticToken('signal.readonly', 'displayAny', 1078),
       semanticToken('signal.readonly', 'displayAny', 1236),
+    );
+  });
+
+  it('should classify composite writable signals in typescript', () => {
+    const {classContentsStart, templateFile} = setupInlineTemplate(
+      '',
+      `
+        a = createCompositeSignalInferred();
+        b = createCompositeSignalInterface();
+        c = createCompositeSignalIntersection();
+        allBla = computed(() => this.a.bla() + this.b.bla() + this.c.bla())
+      `,
+      {
+        '__imports': 'import { computed, signal, Signal, WritableSignal } from "@angular/core";',
+        '__compositeSignal': `
+          function createCompositeSignalInferred() {
+            const state = Object.assign(signal({ foo: 'bar' }), {
+              bla: computed((): string => state.foo),
+            });
+            return state;
+          }
+          interface ICompositeSignal extends WritableSignal<boolean> {
+            bla: Signal<boolean>;
+          }
+          function createCompositeSignalInterface(): ICompositeSignal {
+            return createCompositeSignalInferred();
+          }
+          type TCompositeSignal = WritableSignal<boolean> & {
+            bla: Signal<boolean>;
+          }
+          function createCompositeSignalIntersection(): TCompositeSignal {
+            return createCompositeSignalInferred();
+          }
+        `,
+      },
+    );
+    const actual = templateFile.getEncodedSemanticClassifications();
+    expectClassifications(
+      templateFile,
+      actual,
+      semanticToken('signal', 'a', classContentsStart + 9),
+      semanticToken('signal', 'b', classContentsStart + 54),
+      semanticToken('signal', 'c', classContentsStart + 100),
+      semanticToken('signal.readonly', 'allBla', classContentsStart + 149),
+      semanticToken('signal', 'a', classContentsStart + 178),
+      semanticToken('signal.readonly', 'bla', classContentsStart + 180),
+      semanticToken('signal', 'b', classContentsStart + 193),
+      semanticToken('signal.readonly', 'bla', classContentsStart + 195),
+      semanticToken('signal', 'c', classContentsStart + 208),
+      semanticToken('signal.readonly', 'bla', classContentsStart + 210),
+      semanticToken('signal', 'state', 910),
+      semanticToken('signal', 'state', 1000),
+      semanticToken('signal', 'state', 1047),
     );
   });
 
