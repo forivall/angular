@@ -23,5 +23,7 @@
   "git.ignoreLimitWarning": true,
   "gitlens.advanced.blame.customArguments": [
     "--ignore-revs-file .git-blame-ignore-revs"
-  ]
+  ],
+  "bazel.buildifierExecutable": "node_modules/@bazel/buildifier/buildifier.js",
+  "bazel.executable": "node_modules/@bazel/bazelisk/bazelisk.js"
 }
