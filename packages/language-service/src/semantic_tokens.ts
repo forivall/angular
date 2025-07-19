@@ -9,6 +9,7 @@
 import {
   AbsoluteSourceSpan,
   AST,
+  LetDeclaration,
   ParseSourceSpan,
   PropertyRead,
   R3Identifiers,
@@ -42,9 +43,12 @@ import {
   TmplAstVariable,
   TmplAstVisitor,
 } from '@angular/compiler';
-import type {TemplateTypeChecker} from '@angular/compiler-cli/src/ngtsc/typecheck/api';
-import {NgCompiler} from '@angular/compiler-cli/src/ngtsc/core';
-import {PotentialDirective} from '@angular/compiler-cli/src/ngtsc/typecheck/api';
+import type {
+  PotentialDirective,
+  TemplateTypeChecker,
+} from '@angular/compiler-cli/src/ngtsc/typecheck/api';
+import {SymbolKind} from '@angular/compiler-cli/src/ngtsc/typecheck/api';
+import type {NgCompiler} from '@angular/compiler-cli/src/ngtsc/core';
 import ts from 'typescript';
 import {TypeCheckInfo} from './utils';
 
@@ -341,9 +345,7 @@ export function getClassificationsForTemplate(
   typeCheckInfo: TypeCheckInfo,
   range: ts.TextSpan,
 ): ts.Classifications {
-  const templateTypeChecker = compiler.getTemplateTypeChecker();
-
-  const visitor = new ClassificationVisitor(templateTypeChecker, typeCheckInfo.declaration, range);
+  const visitor = new ClassificationVisitor(compiler, typeCheckInfo.declaration, range);
   visitor.visitAll(typeCheckInfo.nodes);
 
   return {
@@ -355,12 +357,24 @@ export function getClassificationsForTemplate(
 class ClassificationVisitor implements TmplAstVisitor {
   private spans: number[] = [];
   private tags: Map<string, PotentialDirective | null>;
+  private expressionVisitor: TmplExpressionClassificationVisitor;
+  private templateTypeChecker: TemplateTypeChecker;
+  private tsTypeChecker: ts.TypeChecker;
   constructor(
-    private templateTypeChecker: TemplateTypeChecker,
+    compiler: NgCompiler,
     private component: ts.ClassDeclaration,
     private range: ts.TextSpan,
   ) {
+    const templateTypeChecker = compiler.getTemplateTypeChecker();
+    this.templateTypeChecker = templateTypeChecker;
+    this.tsTypeChecker = compiler.getCurrentProgram().getTypeChecker();
     this.tags = templateTypeChecker.getElementsInFileScope(component);
+    this.expressionVisitor = new TmplExpressionClassificationVisitor(
+      compiler,
+      component,
+      range,
+      this.pushSpan.bind(this),
+    );
   }
 
   getSymbolOfNode(node: TmplAstNode | AST) {
@@ -369,6 +383,10 @@ class ClassificationVisitor implements TmplAstVisitor {
 
   getSpans(): number[] {
     return this.spans;
+  }
+
+  pushSpan(start: number, length: number, classification: number) {
+    this.spans.push(start, length, classification);
   }
 
   visit(node: TmplAstNode | null | undefined) {
@@ -386,7 +404,7 @@ class ClassificationVisitor implements TmplAstVisitor {
     const classification = classifyAs(TokenType.class);
 
     if (isComponent && this.rangeIntersectsWith(element.startSourceSpan)) {
-      this.spans.push(element.startSourceSpan.start.offset + 1, tag.length, classification);
+      this.pushSpan(element.startSourceSpan.start.offset + 1, tag.length, classification);
     }
 
     this.visitAll(element.inputs);
@@ -395,7 +413,7 @@ class ClassificationVisitor implements TmplAstVisitor {
     this.visitAll(element.children);
 
     if (isComponent && !element.isSelfClosing && this.rangeIntersectsWith(element.endSourceSpan!)) {
-      this.spans.push(element.endSourceSpan!.start.offset + 2, tag.length, classification);
+      this.pushSpan(element.endSourceSpan!.start.offset + 2, tag.length, classification);
     }
   }
 
@@ -404,14 +422,34 @@ class ClassificationVisitor implements TmplAstVisitor {
   }
 
   visitVariable(variable: TmplAstVariable) {
-    const symbol = this.getSymbolOfNode(variable);
+    const ngSymbol = this.getSymbolOfNode(variable);
+
+    if (ngSymbol?.kind === SymbolKind.Variable) {
+      const classification = classifyType(ngSymbol.tsType, this.tsTypeChecker);
+      if (classification) {
+        this.pushSpan(variable.keySpan.start.offset + 4, variable.name.length, classification);
+        if (variable.valueSpan) {
+          const {
+            start: {offset: startOffset},
+            end,
+          } = variable.valueSpan;
+          this.pushSpan(startOffset, end.offset - startOffset, classification);
+        }
+      }
+    }
   }
   visitReference(reference: TmplAstReference) {}
   visitTextAttribute(attribute: TmplAstTextAttribute) {}
-  visitBoundAttribute(attribute: TmplAstBoundAttribute) {}
-  visitBoundEvent(attribute: TmplAstBoundEvent) {}
+  visitBoundAttribute(attribute: TmplAstBoundAttribute) {
+    this.expressionVisitor.visit(attribute.value, attribute);
+  }
+  visitBoundEvent(attribute: TmplAstBoundEvent) {
+    this.expressionVisitor.visit(attribute.handler, attribute);
+  }
   visitText(text: TmplAstText) {}
-  visitBoundText(text: TmplAstBoundText) {}
+  visitBoundText(text: TmplAstBoundText) {
+    this.expressionVisitor.visit(text.value, text);
+  }
   visitIcu(icu: TmplAstIcu) {}
 
   visitDeferredBlock(deferred: TmplAstDeferredBlock) {
@@ -439,6 +477,7 @@ class ClassificationVisitor implements TmplAstVisitor {
   visitDeferredTrigger(trigger: TmplAstDeferredTrigger) {}
 
   visitSwitchBlock(block: TmplAstSwitchBlock) {
+    this.expressionVisitor.visit(block.expression, block);
     this.visitAll(block.cases);
   }
 
@@ -447,7 +486,10 @@ class ClassificationVisitor implements TmplAstVisitor {
   }
 
   visitForLoopBlock(block: TmplAstForLoopBlock) {
-    // TODO: visit .item and .contextVariables if we can get the symbol type of the variable
+    this.expressionVisitor.visit(block.expression, block);
+    this.expressionVisitor.visit(block.trackBy, block);
+    this.visit(block.item);
+    this.visitAll(block.contextVariables);
     this.visitAll(block.children);
     this.visit(block.empty);
   }
@@ -463,6 +505,7 @@ class ClassificationVisitor implements TmplAstVisitor {
   visitIfBlockBranch(block: TmplAstIfBlockBranch) {
     this.visitAll(block.children);
     // TODO: visit .expressionAlias if variables have symbol type
+    debugger;
   }
 
   visitTemplate(template: TmplAstTemplate) {
@@ -471,13 +514,31 @@ class ClassificationVisitor implements TmplAstVisitor {
     this.visitAll(template.directives);
     this.visitAll(template.children);
     // TODO: visit variables if we can get the symbol type of the variable
+    debugger;
   }
 
   visitUnknownBlock(block: TmplAstUnknownBlock) {}
-  visitLetDeclaration(decl: TmplAstLetDeclaration) {}
+  visitLetDeclaration(decl: TmplAstLetDeclaration) {
+    const ngSymbol = this.getSymbolOfNode(decl);
+    if (ngSymbol?.kind === SymbolKind.LetDeclaration) {
+      const classification = classifyType(ngSymbol.tsType, this.tsTypeChecker);
+      if (classification) {
+        this.pushSpan(decl.nameSpan.start.offset, decl.name.length, classification);
+      }
+    }
+    this.expressionVisitor.visit(decl.value, decl);
+  }
 
-  visitComponent(component: TmplAstComponent) {}
-  visitDirective(directive: TmplAstDirective) {}
+  visitComponent(component: TmplAstComponent) {
+    this.visitAll(component.inputs);
+    this.visitAll(component.outputs);
+    this.visitAll(component.directives);
+    this.visitAll(component.children);
+  }
+  visitDirective(directive: TmplAstDirective) {
+    this.visitAll(directive.inputs);
+    this.visitAll(directive.outputs);
+  }
 
   visitAll(children: TmplAstNode[]) {
     for (const child of children) {
@@ -493,12 +554,21 @@ class ClassificationVisitor implements TmplAstVisitor {
 }
 
 class TmplExpressionClassificationVisitor extends RecursiveAstVisitor {
+  private templateTypeChecker: TemplateTypeChecker;
+  private tsTypeChecker: ts.TypeChecker;
   constructor(
-    private templateTypeChecker: TemplateTypeChecker,
+    compiler: NgCompiler,
     private component: ts.ClassDeclaration,
     private range: ts.TextSpan,
+    private pushSpan: (start: number, length: number, classification: number) => void,
   ) {
     super();
+    this.templateTypeChecker = compiler.getTemplateTypeChecker();
+    this.tsTypeChecker = compiler.getCurrentProgram().getTypeChecker();
+  }
+
+  getSymbolOfNode(node: TmplAstNode | AST) {
+    return this.templateTypeChecker.getSymbolOfNode(node, this.component);
   }
 
   override visit(ast: AST, context?: any) {
@@ -506,8 +576,22 @@ class TmplExpressionClassificationVisitor extends RecursiveAstVisitor {
       ast.visit(this);
     }
   }
+
   override visitPropertyRead(ast: PropertyRead, context: TmplAstNode) {
-    debugger;
+    const ngSymbol = this.getSymbolOfNode(ast);
+    if (ngSymbol?.kind === SymbolKind.Expression) {
+      const classification = classifyType(ngSymbol.tsType, this.tsTypeChecker);
+      if (classification) {
+        this.pushClassification(ast.nameSpan, classification);
+      }
+    }
+    super.visitPropertyRead(ast, context);
+  }
+
+  private pushClassification(span: AbsoluteSourceSpan, classification: number) {
+    const start = span.start;
+    const length = span.end - start;
+    this.pushSpan(start, length, classification);
   }
 
   private rangeIntersectsWith(span: AbsoluteSourceSpan) {
@@ -515,6 +599,13 @@ class TmplExpressionClassificationVisitor extends RecursiveAstVisitor {
     const length = span.end - start;
     return ts.textSpanIntersectsWith(this.range, start, length);
   }
+  // alternative to `.kind` checking:
+  // type UnionKey<T> = T extends never ? never : keyof T;
+  // type ExtractWithKey<T, K extends UnionKey<T>> = T extends {[_ in K]?: unknown}
+  //   ? T
+  //   : T & {[_ in K]?: never};
+  // const tsSymbol = (ngSymbol as ExtractWithKey<typeof ngSymbol, 'tsSymbol'>).tsSymbol;
+  // const tsType = (ngSymbol as ExtractWithKey<typeof ngSymbol, 'tsType'>).tsType;
 }
 
 export function inImportClause(node: ts.Node): boolean {

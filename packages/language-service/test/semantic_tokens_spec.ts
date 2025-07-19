@@ -425,6 +425,132 @@ fdescribe('semantic tokens', () => {
       semanticToken('signal.readonly', 'bla', classContentsStart),
     );
   });
+  fit('should classify signal read in inline template', () => {
+    const {classContentsStart, templateFile, templateStart} = setupInlineTemplate(
+      '{{ bla() }}',
+      'bla = signal(1);',
+      {
+        '__imports': 'import { signal } from "@angular/core";',
+      },
+    );
+    const actual = templateFile.getEncodedSemanticClassifications();
+    expectClassifications(
+      templateFile,
+      actual,
+      semanticToken('signal', 'bla', templateStart + 3),
+      semanticToken('signal', 'bla', classContentsStart),
+    );
+  });
+
+  it('should classify signal reads in templates', () => {
+    const template = `
+    <!-- top level -->
+    {{ bla() }}
+
+    <!-- nested -->
+    <div>
+      {{ bla() }}
+    </div>
+
+    <!-- template -->
+    <ng-template #templateRef [expectedContext]="context" let-implicit let-a="a" let-b="b" let-deep="deep" let-new="new">>
+      {{ bla() }}
+    </ng-template>
+
+    <!-- content -->
+    <ng-content>
+      {{ bla() }}
+    </ng-content>
+
+    <!-- defer -->
+    @defer {
+      {{ bla() }}
+    } @placeholder {
+      {{ bla() }}
+    } @loading {
+      <test-comp />
+    } @error {
+      <test-comp />
+    }
+
+    <!-- switch -->
+    @switch (true) {
+      @case (1) {
+        <test-comp/>
+      } @case (2) {
+        <test-comp/>
+      } @default {
+        <test-comp/>
+      }
+    }
+
+    <!-- for -->
+    @for (item of items;track item) {
+      <li> <test-comp/> </li>
+    } @empty {
+      <li> <test-comp/> </li>
+    }
+
+    <!-- if / else -->
+    @if (true) {
+      <test-comp/>
+    } @else if (false) {
+      <test-comp/>
+    } @else {
+      <test-comp/>
+    }`;
+
+    const {classContentsStart, templateFile} = setup(
+      template,
+      `bla = signal(1);
+        context: {
+          $implicit: Signal<unknown>;
+          a: Signal<unknown>;
+          b: Signal<unknown>;
+          deep: {next: {text: Signal<unknown>}};
+          new?: Signal<unknown>;
+        } = {
+          $implicit: signal('Default Implicit'),
+          a: signal('Default A'),
+          b: signal('Default B'),
+          deep: {next: {text: signal('Default deep text'}}),
+        }
+        `,
+      {
+        '__imports': 'import { signal, Signal } from "@angular/core";',
+        'TestPipe': `
+          @Pipe({name: 'test', standalone: false})
+          export class TestPipe {
+            transform(value: unknown) {
+              return value;
+            }
+          }`,
+        'ExpectedContextDirective': `
+          @Directive({
+            selector: 'ng-template[expectedContext]',
+            standalone: false,
+          })
+          export class ExpectedContextDirective<T> {
+            @Input()
+            expectedContext!: T;
+
+            static ngTemplateContextGuard<T>(
+              _dir: ExpectedContextDirective<T>,
+              _ctx: unknown,
+            ): _ctx is T {
+              return true;
+            }
+          }`,
+      },
+    );
+    const actual = templateFile.getEncodedSemanticClassifications();
+    expectClassifications(
+      templateFile,
+      actual,
+      semanticToken('signal', 'bla', 31),
+      semanticToken('signal', 'bla', classContentsStart),
+    );
+  });
 });
 
 function setup(
@@ -433,10 +559,14 @@ function setup(
   otherDeclarations: {[name: string]: string} = {},
 ): {
   project: Project;
+  classContentsStart: number;
   componentFile: OpenBuffer;
   templateFile: OpenBuffer;
 } {
-  const decls = ['AppCmp', ...Object.keys(otherDeclarations)];
+  const decls = [
+    'AppCmp',
+    ...Object.keys(otherDeclarations).filter((name) => !name.startsWith('__')),
+  ];
 
   const otherDirectiveClassDecls = Object.values(otherDeclarations).join('\n\n');
 
@@ -472,6 +602,7 @@ function setup(
   });
   return {
     project,
+    classContentsStart: 237,
     componentFile: project.openFile('test.ts'),
     templateFile: project.openFile('test.html'),
   };
