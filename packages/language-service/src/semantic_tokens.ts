@@ -9,7 +9,6 @@
 import {
   AbsoluteSourceSpan,
   AST,
-  LetDeclaration,
   ParseSourceSpan,
   PropertyRead,
   R3Identifiers,
@@ -42,6 +41,9 @@ import {
   TmplAstUnknownBlock,
   TmplAstVariable,
   TmplAstVisitor,
+  ASTWithName,
+  SafeCall,
+  SafePropertyRead,
 } from '@angular/compiler';
 import type {
   PotentialDirective,
@@ -113,6 +115,16 @@ const signalTypeIntersectionItems = new WeakMap<ts.Symbol, ts.IntersectionType>(
 function classifyType(tsType: ts.Type, typeChecker: ts.TypeChecker): number | null | undefined {
   if (classifications.has(tsType)) {
     return classifications.get(tsType);
+  }
+  if (tsType.isUnion()) {
+    const nonNull = tsType.getNonNullableType();
+    if (nonNull !== tsType) {
+      const classification = classifyType(nonNull, typeChecker);
+      if (classification !== undefined) {
+        classifications.set(tsType, classification);
+        return classification;
+      }
+    }
   }
   let typeSymbol = tsType.symbol || tsType.aliasSymbol;
   if (typeSymbol) {
@@ -345,6 +357,7 @@ export function getClassificationsForTemplate(
   typeCheckInfo: TypeCheckInfo,
   range: ts.TextSpan,
 ): ts.Classifications {
+  preloadSignalClassifications(compiler.getCurrentProgram());
   const visitor = new ClassificationVisitor(compiler, typeCheckInfo.declaration, range);
   visitor.visitAll(typeCheckInfo.nodes);
 
@@ -427,7 +440,7 @@ class ClassificationVisitor implements TmplAstVisitor {
     if (ngSymbol?.kind === SymbolKind.Variable) {
       const classification = classifyType(ngSymbol.tsType, this.tsTypeChecker);
       if (classification) {
-        this.pushSpan(variable.keySpan.start.offset + 4, variable.name.length, classification);
+        this.pushSpan(variable.keySpan.start.offset, variable.name.length, classification);
         if (variable.valueSpan) {
           const {
             start: {offset: startOffset},
@@ -482,6 +495,9 @@ class ClassificationVisitor implements TmplAstVisitor {
   }
 
   visitSwitchBlockCase(block: TmplAstSwitchBlockCase) {
+    if (block.expression) {
+      this.expressionVisitor.visit(block.expression, block);
+    }
     this.visitAll(block.children);
   }
 
@@ -503,18 +519,33 @@ class ClassificationVisitor implements TmplAstVisitor {
   }
 
   visitIfBlockBranch(block: TmplAstIfBlockBranch) {
+    if (block.expression) {
+      this.expressionVisitor.visit(block.expression, block);
+      if (block.expressionAlias) {
+        const symbol = this.getSymbolOfNode(block.expressionAlias);
+        switch (symbol?.kind) {
+          case SymbolKind.Variable:
+          case SymbolKind.Expression:
+            const classification = classifyType(symbol.tsType, this.tsTypeChecker);
+            if (classification) {
+              this.pushSpan(
+                block.expressionAlias.keySpan.start.offset,
+                block.expressionAlias.name.length,
+                classification,
+              );
+            }
+        }
+      }
+    }
     this.visitAll(block.children);
-    // TODO: visit .expressionAlias if variables have symbol type
-    debugger;
   }
 
   visitTemplate(template: TmplAstTemplate) {
+    this.visitAll(template.variables);
     this.visitAll(template.inputs);
     this.visitAll(template.outputs);
     this.visitAll(template.directives);
     this.visitAll(template.children);
-    // TODO: visit variables if we can get the symbol type of the variable
-    debugger;
   }
 
   visitUnknownBlock(block: TmplAstUnknownBlock) {}
@@ -578,14 +609,25 @@ class TmplExpressionClassificationVisitor extends RecursiveAstVisitor {
   }
 
   override visitPropertyRead(ast: PropertyRead, context: TmplAstNode) {
-    const ngSymbol = this.getSymbolOfNode(ast);
-    if (ngSymbol?.kind === SymbolKind.Expression) {
-      const classification = classifyType(ngSymbol.tsType, this.tsTypeChecker);
-      if (classification) {
-        this.pushClassification(ast.nameSpan, classification);
-      }
-    }
+    this.classifyASTWithName(ast);
     super.visitPropertyRead(ast, context);
+  }
+
+  override visitSafePropertyRead(ast: SafePropertyRead, context: any) {
+    this.classifyASTWithName(ast);
+    super.visitSafePropertyRead(ast, context);
+  }
+
+  private classifyASTWithName(ast: ASTWithName) {
+    const ngSymbol = this.getSymbolOfNode(ast);
+    switch (ngSymbol?.kind) {
+      case SymbolKind.Variable:
+      case SymbolKind.Expression:
+        const classification = classifyType(ngSymbol.tsType, this.tsTypeChecker);
+        if (classification) {
+          this.pushClassification(ast.nameSpan, classification);
+        }
+    }
   }
 
   private pushClassification(span: AbsoluteSourceSpan, classification: number) {

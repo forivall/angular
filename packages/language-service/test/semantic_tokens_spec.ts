@@ -425,7 +425,8 @@ fdescribe('semantic tokens', () => {
       semanticToken('signal.readonly', 'bla', classContentsStart),
     );
   });
-  fit('should classify signal read in inline template', () => {
+
+  it('should classify signal read in inline template', () => {
     const {classContentsStart, templateFile, templateStart} = setupInlineTemplate(
       '{{ bla() }}',
       'bla = signal(1);',
@@ -468,41 +469,44 @@ fdescribe('semantic tokens', () => {
     } @placeholder {
       {{ bla() }}
     } @loading {
-      <test-comp />
+      {{ bla() }}
     } @error {
-      <test-comp />
+      {{ bla() }}
     }
 
     <!-- switch -->
-    @switch (true) {
-      @case (1) {
-        <test-comp/>
+    @switch (bla()) {
+      @case (bla()) {
+        {{ bla() }}
       } @case (2) {
-        <test-comp/>
+        {{ bla() }}
       } @default {
-        <test-comp/>
+        {{ bla() }}
       }
     }
 
     <!-- for -->
-    @for (item of items;track item) {
-      <li> <test-comp/> </li>
+    @for (sig of sigs();track sig()) {
+      {{ bla() }}
     } @empty {
-      <li> <test-comp/> </li>
+      {{ bla() }}
     }
 
     <!-- if / else -->
-    @if (true) {
-      <test-comp/>
+    @if (sigs()[0]; as sig) {
+      {{ bla() }}
     } @else if (false) {
-      <test-comp/>
+      {{ bla() }}
     } @else {
-      <test-comp/>
-    }`;
+      {{ bla() }}
+    }
+    `;
 
-    const {classContentsStart, templateFile} = setup(
+    const {templateFile} = setup(
       template,
-      `bla = signal(1);
+      `
+        bla = signal(1);
+        sigs = signal([signal(1)]);
         context: {
           $implicit: Signal<unknown>;
           a: Signal<unknown>;
@@ -515,7 +519,7 @@ fdescribe('semantic tokens', () => {
           b: signal('Default B'),
           deep: {next: {text: signal('Default deep text'}}),
         }
-        `,
+      `,
       {
         '__imports': 'import { signal, Signal } from "@angular/core";',
         'TestPipe': `
@@ -548,7 +552,89 @@ fdescribe('semantic tokens', () => {
       templateFile,
       actual,
       semanticToken('signal', 'bla', 31),
-      semanticToken('signal', 'bla', classContentsStart),
+      semanticToken('signal', 'bla', 80),
+      semanticToken('signal.readonly', 'implicit', 185),
+      semanticToken('signal.readonly', 'a', 198),
+      semanticToken('signal.readonly', 'a', 201),
+      semanticToken('signal.readonly', 'b', 208),
+      semanticToken('signal.readonly', 'b', 211),
+      semanticToken('signal.readonly', 'new', 234),
+      semanticToken('signal.readonly', 'new', 239),
+      semanticToken('signal', 'bla', 255),
+      semanticToken('signal', 'bla', 331),
+      semanticToken('signal', 'bla', 400),
+      semanticToken('signal', 'bla', 439),
+      semanticToken('signal', 'bla', 474),
+      semanticToken('signal', 'bla', 507),
+      semanticToken('signal', 'bla', 556),
+      semanticToken('signal', 'bla', 578),
+      semanticToken('signal', 'bla', 598),
+      semanticToken('signal', 'bla', 638),
+      semanticToken('signal', 'bla', 677),
+      semanticToken('signal', 'sig', 728),
+      semanticToken('signal', 'sigs', 735),
+      semanticToken('signal', 'sig', 748),
+      semanticToken('signal', 'bla', 766),
+      semanticToken('signal', 'bla', 799),
+      semanticToken('signal', 'sigs', 847),
+      semanticToken('signal', 'sig', 861),
+      semanticToken('signal', 'bla', 877),
+      semanticToken('signal', 'bla', 920),
+      semanticToken('signal', 'bla', 952),
+    );
+  });
+
+  it('should classify signal reads in template expressions', () => {
+    const template = `
+    {{ bla() }}
+    {{ context.deep.next.text() }}
+    {{ context?.deep?.next?.text() }}
+    {{ composite.displayThing() }}
+    {{ composite?.displayThing() }}
+    `;
+
+    const {templateFile} = setup(
+      template,
+      `
+        bla = signal(1);
+        sigs = signal([signal(1)]);
+        context: {
+          $implicit: Signal<unknown>;
+          a: Signal<unknown>;
+          b: Signal<unknown>;
+          deep: {next: {text: Signal<unknown>}};
+          new?: Signal<unknown>;
+        } = {
+          $implicit: signal('Default Implicit'),
+          a: signal('Default A'),
+          b: signal('Default B'),
+          deep: {next: {text: signal('Default deep text'}}),
+        }
+        composite = createCompositeSignal();
+      `,
+      {
+        '__imports': 'import { computed, signal, Signal } from "@angular/core";',
+        '__compositeSignal': `
+          function createCompositeSignal() {
+            const displayAny = Object.assign(computed((): boolean => Object.values(displayAny).some((s) => s())), {
+              displayThing: signal(true),
+              displayOtherThing: signal(false),
+            });
+            return displayAny;
+          }`,
+      },
+    );
+    const actual = templateFile.getEncodedSemanticClassifications();
+    expectClassifications(
+      templateFile,
+      actual,
+      semanticToken('signal', 'bla', 8),
+      semanticToken('signal.readonly', 'text', 42),
+      semanticToken('signal.readonly', 'text', 80),
+      semanticToken('signal.readonly', 'composite', 97),
+      semanticToken('signal', 'displayThing', 107),
+      semanticToken('signal.readonly', 'composite', 132),
+      semanticToken('signal', 'displayThing', 143),
     );
   });
 });
@@ -559,7 +645,6 @@ function setup(
   otherDeclarations: {[name: string]: string} = {},
 ): {
   project: Project;
-  classContentsStart: number;
   componentFile: OpenBuffer;
   templateFile: OpenBuffer;
 } {
@@ -602,7 +687,6 @@ function setup(
   });
   return {
     project,
-    classContentsStart: 237,
     componentFile: project.openFile('test.ts'),
     templateFile: project.openFile('test.html'),
   };
@@ -682,7 +766,7 @@ function expectClassifications(
 
     if (typeof start === 'number') {
       expect(start).withContext('start').toBe(expectedToken.position);
-      expect(text).toBe(expectedToken.text);
+      expect(text).withContext(`at ${start}`).toBe(expectedToken.text);
       expect(type).withContext(`of "${text}" at ${start}`).toBe(expectedToken.type);
     }
   }
