@@ -53,6 +53,7 @@ import {
   getClassificationsForTemplate,
   getClassificationsForTypescript,
   TokenEncodingConsts,
+  TsTypeClassifier,
 } from './semantic_tokens';
 import {isExternalResource} from '@angular/compiler-cli/src/ngtsc/metadata';
 
@@ -321,7 +322,8 @@ export class LanguageService {
     let spans: number[];
     let endOfLineState: ts.EndOfLineState = ts.EndOfLineState.None;
     if (isTypeScriptFile(fileName)) {
-      const sf = compiler.getCurrentProgram().getSourceFile(fileName);
+      const program = compiler.getCurrentProgram();
+      const sf = program.getSourceFile(fileName);
       if (sf === undefined) {
         return {spans: [], endOfLineState: ts.EndOfLineState.None};
       }
@@ -349,12 +351,18 @@ export class LanguageService {
         }
       }
 
+      const typeClassifier = new TsTypeClassifier(program, this.project.projectService.logger);
       spans = [];
       for (const templInfo of typeCheckInfos) {
-        const classifications = getClassificationsForTemplate(compiler, templInfo, span);
+        const classifications = getClassificationsForTemplate(
+          compiler,
+          templInfo,
+          typeClassifier,
+          span,
+        );
         spans.push(...classifications.spans);
       }
-      const typescriptSpans = getClassificationsForTypescript(compiler, sf, span);
+      const typescriptSpans = getClassificationsForTypescript(typeClassifier, sf, span);
       spans.push(...typescriptSpans.spans);
     } else {
       const typeCheckInfo = getTypeCheckInfoAtPosition(fileName, span.start, compiler);
@@ -362,7 +370,13 @@ export class LanguageService {
         return {spans: [], endOfLineState};
       }
 
-      ({spans, endOfLineState} = getClassificationsForTemplate(compiler, typeCheckInfo, span));
+      const typeClassifier = new TsTypeClassifier(compiler.getCurrentProgram());
+      ({spans, endOfLineState} = getClassificationsForTemplate(
+        compiler,
+        typeCheckInfo,
+        typeClassifier,
+        span,
+      ));
     }
     return {spans, endOfLineState};
   }

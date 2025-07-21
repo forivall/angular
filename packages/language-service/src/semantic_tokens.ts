@@ -9,10 +9,12 @@
 import {
   AbsoluteSourceSpan,
   AST,
+  ASTWithName,
   ParseSourceSpan,
   PropertyRead,
   R3Identifiers,
   RecursiveAstVisitor,
+  SafePropertyRead,
   TmplAstBoundAttribute,
   TmplAstBoundEvent,
   TmplAstBoundText,
@@ -41,9 +43,6 @@ import {
   TmplAstUnknownBlock,
   TmplAstVariable,
   TmplAstVisitor,
-  ASTWithName,
-  SafeCall,
-  SafePropertyRead,
 } from '@angular/compiler';
 import type {
   PotentialDirective,
@@ -109,202 +108,213 @@ function classifyAs(type: TokenType, modifiers: number = 0) {
   return ((type + 1) << TokenEncodingConsts.typeOffset) + modifiers;
 }
 
-// TODO: move these below functions into a class
-const classifications = new WeakMap<ts.Symbol | ts.Type, number | null>();
-const signalTypeIntersectionItems = new WeakMap<ts.Symbol, ts.IntersectionType>();
-function classifyType(tsType: ts.Type, typeChecker: ts.TypeChecker): number | null | undefined {
-  if (classifications.has(tsType)) {
-    return classifications.get(tsType);
+export class TsTypeClassifier {
+  tsTypeChecker: ts.TypeChecker;
+  classifications = new WeakMap<ts.Symbol | ts.Type, number | null>();
+  signalTypeIntersectionItems = new WeakMap<ts.Symbol, ts.IntersectionType>();
+  constructor(
+    private program: ts.Program,
+    private logger?: ts.server.Logger,
+  ) {
+    this.tsTypeChecker = program.getTypeChecker();
+    this.preloadSignalClassifications();
   }
-  if (tsType.isUnion()) {
-    const nonNull = tsType.getNonNullableType();
-    if (nonNull !== tsType) {
-      const classification = classifyType(nonNull, typeChecker);
-      if (classification !== undefined) {
-        classifications.set(tsType, classification);
-        return classification;
+  classifyIdentifier(node: ts.Identifier) {
+    let symbol = this.tsTypeChecker.getSymbolAtLocation(node);
+    if (symbol) {
+      if (symbol.flags & ts.SymbolFlags.Alias) {
+        symbol = this.tsTypeChecker.getAliasedSymbol(symbol);
       }
+      const tsType = this.tsTypeChecker.getTypeOfSymbol(symbol);
+      return this.classifyType(tsType);
     }
+    return;
   }
-  let typeSymbol = tsType.symbol || tsType.aliasSymbol;
-  if (typeSymbol) {
-    const classification = classifyTypeSymbolFromAngularCoreOrCache(typeSymbol, typeChecker);
-    if (classification != null) {
-      classifications.set(tsType, classification);
-      return classification;
+  classifyType(tsType: ts.Type): number | null | undefined {
+    if (this.classifications.has(tsType)) {
+      return this.classifications.get(tsType);
     }
-  }
-  if (tsType.isIntersection()) {
-    const typeSymbolFromIntersection = getSignalSymbolFromIntersection(tsType);
-    if (typeSymbolFromIntersection) {
-      const classification = classifyTypeSymbolFromAngularCoreOrCache(
-        typeSymbolFromIntersection,
-        typeChecker,
-      );
-      if (classification !== undefined) {
-        classifications.set(tsType, classification);
-        return classification;
-      }
-    }
-    for (const baseType of tsType.types) {
-      const baseClassification = classifyType(baseType, typeChecker);
-      if (baseClassification != null) {
-        classifications.set(tsType, baseClassification);
-        if (typeSymbol) {
-          classifications.set(typeSymbol, baseClassification);
+    if (tsType.isUnion()) {
+      const nonNull = tsType.getNonNullableType();
+      if (nonNull !== tsType) {
+        const classification = this.classifyType(nonNull);
+        if (classification !== undefined) {
+          this.classifications.set(tsType, classification);
+          return classification;
         }
-        return baseClassification;
       }
     }
-  }
-  if (tsType.isClassOrInterface()) {
-    const baseTypes = typeChecker.getBaseTypes(tsType);
-    for (const baseType of baseTypes) {
-      const classification = classifyType(baseType, typeChecker);
+    let typeSymbol = tsType.symbol || tsType.aliasSymbol;
+    if (typeSymbol) {
+      const classification = this.classifyTypeSymbolFromAngularCoreOrCache(typeSymbol);
       if (classification != null) {
-        classifications.set(tsType, classification);
-        if (typeSymbol) {
-          classifications.set(typeSymbol, null);
+        this.classifications.set(tsType, classification);
+        return classification;
+      }
+    }
+    if (tsType.isIntersection()) {
+      const typeSymbolFromIntersection = this.getSignalSymbolFromIntersection(tsType);
+      if (typeSymbolFromIntersection) {
+        const classification = this.classifyTypeSymbolFromAngularCoreOrCache(
+          typeSymbolFromIntersection,
+        );
+        if (classification !== undefined) {
+          this.classifications.set(tsType, classification);
+          return classification;
         }
-        return classification;
+      }
+      for (const baseType of tsType.types) {
+        const baseClassification = this.classifyType(baseType);
+        if (baseClassification != null) {
+          this.classifications.set(tsType, baseClassification);
+          if (typeSymbol) {
+            this.classifications.set(typeSymbol, baseClassification);
+          }
+          return baseClassification;
+        }
       }
     }
-  }
-  classifications.set(tsType, null);
-  if (typeSymbol) {
-    classifications.set(typeSymbol, null);
-  }
-  return null;
-}
-function getSignalSymbolFromIntersection(tsType: ts.IntersectionType) {
-  const parentTypes = tsType.types
-    .map((baseType) => signalTypeIntersectionItems.get(baseType.symbol))
-    .reduce(
-      (acc, intersectionType) =>
-        intersectionType ? acc.set(intersectionType, (acc.get(intersectionType) ?? 0) + 1) : acc,
-      new Map<ts.IntersectionType, number>(),
-    );
-  for (const [parentType, matchedItems] of parentTypes) {
-    if (parentType.types.length === matchedItems) {
-      return parentType.symbol || parentType.aliasSymbol;
-    }
-  }
-  // alternatively to this technique, we could look at the source file for the intersection items
-  // and walk up the parents of `baseType.symbol.declarations[0]` to find which signal type it's part of.
-  return;
-}
-function classifyTypeSymbolFromAngularCoreOrCache(
-  typeSymbol: ts.Symbol,
-  typeChecker?: ts.TypeChecker,
-): number | null | undefined {
-  if (typeChecker && typeSymbol.flags & ts.SymbolFlags.Alias) {
-    const aliasSymbol = typeChecker.getAliasedSymbol(typeSymbol);
-    return aliasSymbol && classifyTypeSymbolFromAngularCoreOrCache(aliasSymbol);
-  }
-  if (classifications.has(typeSymbol)) {
-    return classifications.get(typeSymbol);
-  }
-  const signalTypeName = typeSymbol.name;
-  if (SIGNAL_FNS.has(signalTypeName)) {
-    const declarations = typeSymbol.getDeclarations();
-    if (declarations) {
-      const isSignalSymbol = declarations.some((decl) => {
-        const fileName = decl.getSourceFile().fileName;
-
-        return (
-          (ts.isInterfaceDeclaration(decl) || ts.isTypeAliasDeclaration(decl)) &&
-          SIGNAL_FNS.has(decl.name.text) &&
-          (fileName.includes('@angular/core') ||
-            fileName.includes('angular2/rc/packages/core') ||
-            fileName.includes('bin/packages/core')) // for local usage in some tests
-        );
-      });
-      if (isSignalSymbol) {
-        // TODO: warn that signal was not preloaded
-        const classification = classifyAs(
-          signalTypeName[0] === 'I' ? TokenType.inputSignal : TokenType.signal,
-          signalTypeName[0] === 'W' ? 0 : 1 << TokenModifier.readonly,
-        );
-        classifications.set(typeSymbol, classification);
-        return classification;
+    if (tsType.isClassOrInterface()) {
+      const baseTypes = this.tsTypeChecker.getBaseTypes(tsType);
+      for (const baseType of baseTypes) {
+        const classification = this.classifyType(baseType);
+        if (classification != null) {
+          this.classifications.set(tsType, classification);
+          if (typeSymbol) {
+            this.classifications.set(typeSymbol, null);
+          }
+          return classification;
+        }
       }
     }
+    this.classifications.set(tsType, null);
+    if (typeSymbol) {
+      this.classifications.set(typeSymbol, null);
+    }
+    return null;
   }
-  return;
-}
-function getAngularCoreSourceFileSymbol(program: ts.Program, sf?: ts.SourceFile) {
-  program.getSemanticDiagnostics;
-  let ngCoreImport = sf?.statements.find(
-    (s): s is ts.ImportDeclaration =>
-      ts.isImportDeclaration(s) &&
-      (s.moduleSpecifier as ts.StringLiteral).text === R3Identifiers.core.moduleName,
-  );
-  if (!ngCoreImport) {
-    for (const sf of program.getSourceFiles()) {
-      if (program.isSourceFileFromExternalLibrary(sf)) {
-        continue;
-      }
-      ngCoreImport = sf.statements.find(
-        (s): s is ts.ImportDeclaration =>
-          ts.isImportDeclaration(s) &&
-          (s.moduleSpecifier as ts.StringLiteral).text === R3Identifiers.core.moduleName,
+  private getSignalSymbolFromIntersection(tsType: ts.IntersectionType) {
+    const parentTypes = tsType.types
+      .map((baseType) => this.signalTypeIntersectionItems.get(baseType.symbol))
+      .reduce(
+        (acc, intersectionType) =>
+          intersectionType ? acc.set(intersectionType, (acc.get(intersectionType) ?? 0) + 1) : acc,
+        new Map<ts.IntersectionType, number>(),
       );
-      if (ngCoreImport) {
-        break;
+    for (const [parentType, matchedItems] of parentTypes) {
+      if (parentType.types.length === matchedItems) {
+        return parentType.symbol || parentType.aliasSymbol;
       }
     }
+    // alternatively to this technique, we could look at the source file for the intersection items
+    // and walk up the parents of `baseType.symbol.declarations[0]` to find which signal type it's part of.
+    return;
   }
-  if (ngCoreImport) {
-    const typeChecker = program.getTypeChecker();
-    const tsSymbol = typeChecker.getSymbolAtLocation(ngCoreImport.moduleSpecifier);
-    if (tsSymbol) {
-      return tsSymbol as ts.Symbol & {valueDeclaration: ts.SourceFile};
+  private classifyTypeSymbolFromAngularCoreOrCache(
+    typeSymbol: ts.Symbol,
+  ): number | null | undefined {
+    if (typeSymbol.flags & ts.SymbolFlags.Alias) {
+      const aliasSymbol = this.tsTypeChecker.getAliasedSymbol(typeSymbol);
+      return aliasSymbol && this.classifyTypeSymbolFromAngularCoreOrCache(aliasSymbol);
     }
-  }
-  return;
-}
-function preloadSignalClassifications(program: ts.Program, sf?: ts.SourceFile) {
-  const typeChecker = program.getTypeChecker();
-  const ngCoreSymbol = getAngularCoreSourceFileSymbol(program, sf);
-  if (ngCoreSymbol?.exports) {
-    for (const signalTypeName of SIGNAL_FNS) {
-      let signalSymbol = ngCoreSymbol.exports.get(signalTypeName as ts.__String);
-      if (signalSymbol) {
-        if (signalSymbol.flags & ts.SymbolFlags.Alias) {
-          signalSymbol = program.getTypeChecker().getAliasedSymbol(signalSymbol);
-        }
-        classifications.set(
-          signalSymbol,
-          classifyAs(
+    if (this.classifications.has(typeSymbol)) {
+      return this.classifications.get(typeSymbol);
+    }
+    const signalTypeName = typeSymbol.name;
+    if (SIGNAL_FNS.has(signalTypeName)) {
+      const declarations = typeSymbol.getDeclarations();
+      if (declarations) {
+        const isSignalSymbol = declarations.some((decl) => {
+          const fileName = decl.getSourceFile().fileName;
+
+          return (
+            (ts.isInterfaceDeclaration(decl) || ts.isTypeAliasDeclaration(decl)) &&
+            SIGNAL_FNS.has(decl.name.text) &&
+            (fileName.includes('@angular/core') ||
+              fileName.includes('angular2/rc/packages/core') ||
+              fileName.includes('bin/packages/core')) // for local usage in some tests
+          );
+        });
+        if (isSignalSymbol) {
+          // TODO: warn that signal was not preloaded
+          const classification = classifyAs(
             signalTypeName[0] === 'I' ? TokenType.inputSignal : TokenType.signal,
             signalTypeName[0] === 'W' ? 0 : 1 << TokenModifier.readonly,
-          ),
-        );
-        const signalDeclaration = signalSymbol.declarations?.[0];
-        const signalType = signalDeclaration && typeChecker?.getTypeAtLocation(signalDeclaration);
-        if (signalType?.isIntersection()) {
-          for (const intersectionElement of signalType.types) {
-            signalTypeIntersectionItems.set(intersectionElement.symbol, signalType);
-          }
+          );
+          this.classifications.set(typeSymbol, classification);
+          return classification;
         }
-      } else {
-        // TODO: warn that a signal type couldnt be preloaded
+      }
+    }
+    return;
+  }
+  private getAngularCoreSourceFileSymbol(sf?: ts.SourceFile) {
+    let ngCoreImport = sf?.statements.find(
+      (s): s is ts.ImportDeclaration =>
+        ts.isImportDeclaration(s) &&
+        (s.moduleSpecifier as ts.StringLiteral).text === R3Identifiers.core.moduleName,
+    );
+    if (!ngCoreImport) {
+      for (const sf of this.program.getSourceFiles()) {
+        if (this.program.isSourceFileFromExternalLibrary(sf)) {
+          continue;
+        }
+        ngCoreImport = sf.statements.find(
+          (s): s is ts.ImportDeclaration =>
+            ts.isImportDeclaration(s) &&
+            (s.moduleSpecifier as ts.StringLiteral).text === R3Identifiers.core.moduleName,
+        );
+        if (ngCoreImport) {
+          break;
+        }
+      }
+    }
+    if (ngCoreImport) {
+      const typeChecker = this.program.getTypeChecker();
+      const tsSymbol = typeChecker.getSymbolAtLocation(ngCoreImport.moduleSpecifier);
+      if (tsSymbol) {
+        return tsSymbol as ts.Symbol & {valueDeclaration: ts.SourceFile};
+      }
+    }
+    return;
+  }
+  private preloadSignalClassifications(sf?: ts.SourceFile) {
+    const ngCoreSymbol = this.getAngularCoreSourceFileSymbol(sf);
+    if (ngCoreSymbol?.exports) {
+      for (const signalTypeName of SIGNAL_FNS) {
+        let signalSymbol = ngCoreSymbol.exports.get(signalTypeName as ts.__String);
+        if (signalSymbol) {
+          if (signalSymbol.flags & ts.SymbolFlags.Alias) {
+            signalSymbol = this.tsTypeChecker.getAliasedSymbol(signalSymbol);
+          }
+          this.classifications.set(
+            signalSymbol,
+            classifyAs(
+              signalTypeName[0] === 'I' ? TokenType.inputSignal : TokenType.signal,
+              signalTypeName[0] === 'W' ? 0 : 1 << TokenModifier.readonly,
+            ),
+          );
+          const signalDeclaration = signalSymbol.declarations?.[0];
+          const signalType =
+            signalDeclaration && this.tsTypeChecker.getTypeAtLocation(signalDeclaration);
+          if (signalType?.isIntersection()) {
+            for (const intersectionElement of signalType.types) {
+              this.signalTypeIntersectionItems.set(intersectionElement.symbol, signalType);
+            }
+          }
+        } else {
+          this.logger?.info(`NgLS: failed to load ${signalTypeName}`);
+        }
       }
     }
   }
 }
 
 export function getClassificationsForTypescript(
-  compiler: NgCompiler,
+  typeClassifier: TsTypeClassifier,
   sf: ts.SourceFile,
   range: ts.TextSpan,
 ): ts.Classifications {
-  const program = compiler.getCurrentProgram();
-  const typeChecker = program?.getTypeChecker();
-  if (!typeChecker) {
-    return {spans: [], endOfLineState: ts.EndOfLineState.None};
-  }
-  preloadSignalClassifications(program, sf);
   const spans: number[] = [];
   let inJSXElement = false;
   function visitTs(node: ts.Node) {
@@ -317,6 +327,17 @@ export function getClassificationsForTypescript(
     }
     if (ts.isJsxExpression(node)) {
       inJSXElement = false;
+    }
+
+    function inImportClause(node: ts.Node): boolean {
+      const parent = node.parent;
+      return (
+        parent &&
+        (ts.isImportClause(parent) || ts.isImportSpecifier(parent) || ts.isNamespaceImport(parent))
+      );
+    }
+    function isInfinityOrNaNString(name: string | ts.__String): boolean {
+      return name === 'Infinity' || name === '-Infinity' || name === 'NaN';
     }
 
     if (
@@ -332,16 +353,9 @@ export function getClassificationsForTypescript(
         )
       )
     ) {
-      let symbol = typeChecker.getSymbolAtLocation(node);
-      if (symbol) {
-        if (symbol.flags & ts.SymbolFlags.Alias) {
-          symbol = typeChecker.getAliasedSymbol(symbol);
-        }
-        const tsType = typeChecker.getTypeOfSymbol(symbol);
-        const classification = classifyType(tsType, typeChecker);
-        if (classification) {
-          spans.push(node.getStart(), node.getWidth(), classification);
-        }
+      const classification = typeClassifier.classifyIdentifier(node);
+      if (classification) {
+        spans.push(node.getStart(), node.getWidth(), classification);
       }
     }
     ts.forEachChild(node, visitTs);
@@ -355,10 +369,17 @@ export function getClassificationsForTypescript(
 export function getClassificationsForTemplate(
   compiler: NgCompiler,
   typeCheckInfo: TypeCheckInfo,
+  tsTypeClassifier: TsTypeClassifier,
   range: ts.TextSpan,
 ): ts.Classifications {
-  preloadSignalClassifications(compiler.getCurrentProgram());
-  const visitor = new ClassificationVisitor(compiler, typeCheckInfo.declaration, range);
+  const templateTypeChecker = compiler.getTemplateTypeChecker();
+
+  const visitor = new ClassificationVisitor(
+    templateTypeChecker,
+    tsTypeClassifier,
+    typeCheckInfo.declaration,
+    range,
+  );
   visitor.visitAll(typeCheckInfo.nodes);
 
   return {
@@ -371,19 +392,16 @@ class ClassificationVisitor implements TmplAstVisitor {
   private spans: number[] = [];
   private tags: Map<string, PotentialDirective | null>;
   private expressionVisitor: TmplExpressionClassificationVisitor;
-  private templateTypeChecker: TemplateTypeChecker;
-  private tsTypeChecker: ts.TypeChecker;
   constructor(
-    compiler: NgCompiler,
+    private templateTypeChecker: TemplateTypeChecker,
+    private typeClassifier: TsTypeClassifier,
     private component: ts.ClassDeclaration,
     private range: ts.TextSpan,
   ) {
-    const templateTypeChecker = compiler.getTemplateTypeChecker();
-    this.templateTypeChecker = templateTypeChecker;
-    this.tsTypeChecker = compiler.getCurrentProgram().getTypeChecker();
     this.tags = templateTypeChecker.getElementsInFileScope(component);
     this.expressionVisitor = new TmplExpressionClassificationVisitor(
-      compiler,
+      templateTypeChecker,
+      typeClassifier,
       component,
       range,
       this.pushSpan.bind(this),
@@ -438,7 +456,7 @@ class ClassificationVisitor implements TmplAstVisitor {
     const ngSymbol = this.getSymbolOfNode(variable);
 
     if (ngSymbol?.kind === SymbolKind.Variable) {
-      const classification = classifyType(ngSymbol.tsType, this.tsTypeChecker);
+      const classification = this.typeClassifier.classifyType(ngSymbol.tsType);
       if (classification) {
         this.pushSpan(variable.keySpan.start.offset, variable.name.length, classification);
         if (variable.valueSpan) {
@@ -526,7 +544,7 @@ class ClassificationVisitor implements TmplAstVisitor {
         switch (symbol?.kind) {
           case SymbolKind.Variable:
           case SymbolKind.Expression:
-            const classification = classifyType(symbol.tsType, this.tsTypeChecker);
+            const classification = this.typeClassifier.classifyType(symbol.tsType);
             if (classification) {
               this.pushSpan(
                 block.expressionAlias.keySpan.start.offset,
@@ -552,7 +570,7 @@ class ClassificationVisitor implements TmplAstVisitor {
   visitLetDeclaration(decl: TmplAstLetDeclaration) {
     const ngSymbol = this.getSymbolOfNode(decl);
     if (ngSymbol?.kind === SymbolKind.LetDeclaration) {
-      const classification = classifyType(ngSymbol.tsType, this.tsTypeChecker);
+      const classification = this.typeClassifier.classifyType(ngSymbol.tsType);
       if (classification) {
         this.pushSpan(decl.nameSpan.start.offset, decl.name.length, classification);
       }
@@ -585,17 +603,14 @@ class ClassificationVisitor implements TmplAstVisitor {
 }
 
 class TmplExpressionClassificationVisitor extends RecursiveAstVisitor {
-  private templateTypeChecker: TemplateTypeChecker;
-  private tsTypeChecker: ts.TypeChecker;
   constructor(
-    compiler: NgCompiler,
+    private templateTypeChecker: TemplateTypeChecker,
+    private typeClassifier: TsTypeClassifier,
     private component: ts.ClassDeclaration,
     private range: ts.TextSpan,
     private pushSpan: (start: number, length: number, classification: number) => void,
   ) {
     super();
-    this.templateTypeChecker = compiler.getTemplateTypeChecker();
-    this.tsTypeChecker = compiler.getCurrentProgram().getTypeChecker();
   }
 
   getSymbolOfNode(node: TmplAstNode | AST) {
@@ -623,7 +638,7 @@ class TmplExpressionClassificationVisitor extends RecursiveAstVisitor {
     switch (ngSymbol?.kind) {
       case SymbolKind.Variable:
       case SymbolKind.Expression:
-        const classification = classifyType(ngSymbol.tsType, this.tsTypeChecker);
+        const classification = this.typeClassifier.classifyType(ngSymbol.tsType);
         if (classification) {
           this.pushClassification(ast.nameSpan, classification);
         }
@@ -648,15 +663,4 @@ class TmplExpressionClassificationVisitor extends RecursiveAstVisitor {
   //   : T & {[_ in K]?: never};
   // const tsSymbol = (ngSymbol as ExtractWithKey<typeof ngSymbol, 'tsSymbol'>).tsSymbol;
   // const tsType = (ngSymbol as ExtractWithKey<typeof ngSymbol, 'tsType'>).tsType;
-}
-
-export function inImportClause(node: ts.Node): boolean {
-  const parent = node.parent;
-  return (
-    parent &&
-    (ts.isImportClause(parent) || ts.isImportSpecifier(parent) || ts.isNamespaceImport(parent))
-  );
-}
-export function isInfinityOrNaNString(name: string | ts.__String): boolean {
-  return name === 'Infinity' || name === '-Infinity' || name === 'NaN';
 }
